@@ -162,8 +162,7 @@ final class TodoStateCore {
 
     JSONArray query(String filter, String id, String category, String status, long nowMs) {
         JSONArray out = new JSONArray();
-        String f = clean(filter).toLowerCase(Locale.US);
-        if (f.isEmpty()) f = "all";
+        String f = normalizeFilter(filter);
         String wantedId = clean(id);
         String wantedCategory = clean(category);
         String wantedStatus = normalizeStatusFilter(status);
@@ -292,10 +291,19 @@ final class TodoStateCore {
         return v.isEmpty() ? "normal" : v;
     }
 
+    private static String normalizeFilter(String value) {
+        String v = clean(value).toLowerCase(Locale.US);
+        if (v.isEmpty()) return "all";
+        if ("all".equals(v) || STATUS_OPEN.equals(v) || STATUS_COMPLETED.equals(v)
+                || "overdue".equals(v) || "due_today".equals(v)) return v;
+        throw new IllegalArgumentException("invalid_filter:" + v);
+    }
+
     private static String normalizeStatusFilter(String value) {
         String v = clean(value).toLowerCase(Locale.US);
+        if (v.isEmpty()) return "";
         if (STATUS_OPEN.equals(v) || STATUS_COMPLETED.equals(v)) return v;
-        return "";
+        throw new IllegalArgumentException("invalid_status:" + v);
     }
 
     private static String clean(String value) { return value == null ? "" : value.trim(); }

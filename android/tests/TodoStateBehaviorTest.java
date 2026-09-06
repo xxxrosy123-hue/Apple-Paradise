@@ -74,6 +74,27 @@ public final class TodoStateBehaviorTest {
         core.update("todo_b", todayPatch, now + 80L);
         check(TodoStateCore.isDueToday(core.get("todo_b"), now), "same local date deadline must be due_today");
 
+        // Query contract closeout: valid enums succeed; invalid values fail explicitly.
+        check(core.query("due_today", "", "", "", now).length() >= 1, "due_today filter must be accepted");
+
+        boolean invalidFilterRejected = false;
+        try { core.query("due-today", "", "", "", now); }
+        catch (IllegalArgumentException expected) {
+            invalidFilterRejected = "invalid_filter:due-today".equals(expected.getMessage());
+        }
+        check(invalidFilterRejected, "invalid filter must fail with invalid_filter");
+
+        check(core.query("all", "", "", "open", now).length() == 1, "status=open must filter to open Todos");
+        check(core.query("all", "", "", "completed", now).length() == 1, "status=completed must filter to completed Todos");
+        check(core.query("all", "", "", "", now).length() == 2, "missing status must mean no status filter");
+
+        boolean invalidStatusRejected = false;
+        try { core.query("all", "", "", "done", now); }
+        catch (IllegalArgumentException expected) {
+            invalidStatusRejected = "invalid_status:done".equals(expected.getMessage());
+        }
+        check(invalidStatusRejected, "invalid status must fail with invalid_status");
+
         // 9. Serialize -> read must preserve durable fields and ids.
         String json = core.toPersistedJson().toString();
         TodoStateCore restored = TodoStateCore.fromJson(json);
