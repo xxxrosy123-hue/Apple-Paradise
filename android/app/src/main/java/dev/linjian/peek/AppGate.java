@@ -38,6 +38,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 /** 应用门禁：用无障碍监听前台 App，打开被锁 App 时弹出锁定页。 */
 public class AppGate {
@@ -172,11 +173,42 @@ public class AppGate {
         String pkg = resolvePackage(ctx, cmd);
         if (!AppPrefs.isPackageLike(pkg)) return put(new JSONObject(), false, "package_invalid");
         if (isProtectedPackage(ctx, pkg)) return put(new JSONObject(), false, "protected_package:" + pkg);
+
+        long now = System.currentTimeMillis();
+        JSONObject s = state(ctx);
+        JSONObject existing = locks(s).optJSONObject(pkg);
+        boolean revokeTemporaryAllow = cmd.optBoolean("revoke_temporary_allow", cmd.optBoolean("revokeTemporaryAllow", false));
+        if (existing != null && existing.optBoolean("temporary_active", false)) {
+            if (temporaryStillValid(existing, now)) {
+                if (!revokeTemporaryAllow) {
+                    JSONObject out = new JSONObject();
+                    long expiresAt = temporaryExpiresAt(existing);
+                    out.put("ok", false);
+                    out.put("error", "conflict_active_permission");
+                    out.put("package", pkg);
+                    out.put("active_permission", temporaryDecisionJson(existing, now));
+                    out.put("result", "conflict_active_permission:" + pkg + (expiresAt > 0 ? " until " + formatLocal(expiresAt) : ""));
+                    out.put("message", "已有仍有效的临时 ALLOW；普通重复锁定不会清除它。只有明确撤销时才传 revoke_temporary_allow=true。");
+                    log(ctx, "拒绝普通重复锁定：" + pkg + " 仍有有效临时放行");
+                    return out;
+                }
+                String decisionId = existing.optString("temporary_decision_id", "");
+                clearTemp(existing);
+                locks(s).put(pkg, existing);
+                save(ctx, s);
+                log(ctx, "明确撤销临时放行：" + pkg + (decisionId.length() > 0 ? " decision=" + decisionId : ""));
+            } else {
+                clearTemp(existing);
+                locks(s).put(pkg, existing);
+                save(ctx, s);
+            }
+        }
+
         String appName = cmd.optString("appName", cmd.optString("app_name", cmd.optString("app", labelOf(ctx, pkg))));
         long until = cmd.optLong("locked_until_ms", 0);
         if (until <= 0) {
             double minutes = commandMinutes(cmd, 30);
-            until = System.currentTimeMillis() + Math.round(minutes * 60000.0);
+            until = now + Math.round(minutes * 60000.0);
         }
         JSONObject lock = new JSONObject();
         lock.put("package", pkg);
@@ -187,12 +219,12 @@ public class AppGate {
         lock.put("mode", normalizeMode(cmd.optString("mode", "medium")));
         lock.put("reason", cmd.optString("reason", "").trim());
         lock.put("message", cmd.optString("message", "").trim());
-        lock.put("created_at_ms", System.currentTimeMillis());
+        lock.put("created_at_ms", now);
         lock.put("emergency_unlock_minutes", Math.max(1, cmd.optInt("emergencyUnlockMinutes", cmd.optInt("emergency_unlock_minutes", 5))));
         String pass = cmd.optString("emergencyPassphrase", cmd.optString("emergency_passphrase", ""));
         if (pass.length() > 0) lock.put("emergency_hash", hash(pass));
         clearTemp(lock);
-        JSONObject s = state(ctx); locks(s).put(pkg, lock); save(ctx, s);
+        locks(s).put(pkg, lock); save(ctx, s);
         addGateApp(ctx, lock.optString("app_name", labelOf(ctx, pkg)), pkg);
         log(ctx, "锁定 " + lock.optString("app_name") + " 到 " + lock.optString("locked_until_local") + "：" + lock.optString("reason"));
         return put(new JSONObject(), true, "locked_app:" + pkg + " until " + lock.optString("locked_until_local"));
@@ -216,18 +248,43 @@ public class AppGate {
         double minutes = cmd.optDouble("allowed_minutes", cmd.optDouble("minutes", 10));
         if (minutes <= 0) minutes = 10;
         double maxWindow = cmd.optDouble("max_window_minutes", Math.max(minutes, 30));
+        long until = now + Math.round(minutes * 60000.0);
+        long windowUntil = now + Math.round(maxWindow * 60000.0);
+        long allowedMs = Math.round(minutes * 60000.0);
+        String reason = cmd.optString("allow_reason", cmd.optString("reason", "")).trim();
+        String source = cmd.optString("source", "mcp").trim();
+        if (source.length() == 0) source = "mcp";
+        String approvedBy = cmd.optString("approved_by", cmd.optString("approver", source)).trim();
+        if (approvedBy.length() == 0) approvedBy = source;
+        String decisionId = cmd.optString("decision_id", "").trim();
+        if (decisionId.length() == 0) decisionId = "allow_" + UUID.randomUUID().toString();
+        String purpose = cmd.optString("purpose", cmd.optString("allow_purpose", type)).trim();
+
         l.put("temporary_active", true);
+        l.put("temporary_decision", "ALLOW");
         l.put("temporary_type", type);
         l.put("temporary_started_at_ms", now);
-        l.put("temporary_until_ms", now + Math.round(minutes * 60000.0));
-        l.put("temporary_window_until_ms", now + Math.round(maxWindow * 60000.0));
-        l.put("temporary_allowed_ms", Math.round(minutes * 60000.0));
+        l.put("temporary_created_at_ms", now);
+        l.put("temporary_created_at_local", formatLocal(now));
+        l.put("temporary_until_ms", until);
+        l.put("temporary_window_until_ms", windowUntil);
+        l.put("temporary_allowed_ms", allowedMs);
         l.put("temporary_used_ms", 0);
         l.put("temporary_session_started_ms", 0);
         l.put("temporary_one_time_used", false);
+        l.put("temporary_reason", reason);
+        l.put("temporary_source", source);
+        l.put("temporary_approved_by", approvedBy);
+        l.put("temporary_decision_id", decisionId);
+        l.put("temporary_purpose", purpose);
+        long expiresAt = AppGateDecisionRules.effectiveExpiryMs(type, until, windowUntil);
+        l.put("temporary_expires_at_ms", expiresAt);
+        l.put("temporary_expires_at_local", expiresAt > 0 ? formatLocal(expiresAt) : "");
         save(ctx, s);
-        log(ctx, "临时放行 " + l.optString("app_name", pkg) + "：" + minutes + " 分钟，type=" + type);
-        return put(new JSONObject(), true, "temporary_unlocked:" + pkg + " " + minutes + "min type=" + type);
+        log(ctx, "临时放行 " + l.optString("app_name", pkg) + "：" + minutes + " 分钟，type=" + type + "，source=" + source + (reason.length() > 0 ? "，reason=" + reason : ""));
+        JSONObject out = put(new JSONObject(), true, "temporary_unlocked:" + pkg + " " + minutes + "min type=" + type);
+        out.put("permission", temporaryDecisionJson(l, now));
+        return out;
     }
 
     private static JSONObject extendLock(Context ctx, JSONObject cmd) throws Exception {
@@ -443,34 +500,82 @@ public class AppGate {
         try { return activeLockFor(ctx, pkg, System.currentTimeMillis()); } catch (Exception e) { return null; }
     }
 
+    private static boolean temporaryStillValid(JSONObject l, long now) {
+        if (l == null) return false;
+        return AppGateDecisionRules.isTemporaryAllowEffective(
+                l.optBoolean("temporary_active", false),
+                l.optString("temporary_type", "real_time"),
+                now,
+                l.optLong("temporary_until_ms", 0),
+                l.optLong("temporary_window_until_ms", l.optLong("temporary_until_ms", 0)),
+                l.optLong("temporary_allowed_ms", 0),
+                l.optLong("temporary_used_ms", 0),
+                l.optLong("temporary_session_started_ms", 0),
+                l.optBoolean("temporary_one_time_used", false));
+    }
+
+    private static long temporaryExpiresAt(JSONObject l) {
+        if (l == null) return 0;
+        long stored = l.optLong("temporary_expires_at_ms", 0);
+        if (stored > 0) return stored;
+        return AppGateDecisionRules.effectiveExpiryMs(
+                l.optString("temporary_type", "real_time"),
+                l.optLong("temporary_until_ms", 0),
+                l.optLong("temporary_window_until_ms", l.optLong("temporary_until_ms", 0)));
+    }
+
+    private static void saveLock(Context ctx, JSONObject l) throws Exception {
+        JSONObject s = state(ctx);
+        locks(s).put(l.optString("package"), l);
+        save(ctx, s);
+    }
+
     private static boolean isTemporarilyAllowed(Context ctx, JSONObject l, long now, boolean updateSession) throws Exception {
         if (!l.optBoolean("temporary_active", false)) return false;
+        if (!temporaryStillValid(l, now)) {
+            clearTemp(l);
+            saveLock(ctx, l);
+            return false;
+        }
         String type = l.optString("temporary_type", "real_time");
-        if (now > l.optLong("temporary_window_until_ms", l.optLong("temporary_until_ms", 0))) { clearTemp(l); JSONObject ss = state(ctx); locks(ss).put(l.optString("package"), l); save(ctx, ss); return false; }
         if ("foreground_usage".equals(type)) {
-            long used = l.optLong("temporary_used_ms", 0);
             long start = l.optLong("temporary_session_started_ms", 0);
-            boolean changed = false;
-            if (start <= 0 && updateSession) { l.put("temporary_session_started_ms", now); start = now; changed = true; }
-            long live = start > 0 ? Math.max(0, now - start) : 0;
-            if (used + live >= l.optLong("temporary_allowed_ms", 0)) { clearTemp(l); JSONObject ss = state(ctx); locks(ss).put(l.optString("package"), l); save(ctx, ss); return false; }
-            if (changed) {
-                JSONObject s = state(ctx); locks(s).put(l.optString("package"), l); save(ctx, s);
+            if (start <= 0 && updateSession) {
+                l.put("temporary_session_started_ms", now);
+                saveLock(ctx, l);
             }
             return true;
         }
         if ("one_time".equals(type)) {
-            if (l.optBoolean("temporary_one_time_used", false)) return false;
-            if (updateSession) { l.put("temporary_one_time_used", true); JSONObject s = state(ctx); locks(s).put(l.optString("package"), l); save(ctx, s); }
+            if (updateSession) {
+                l.put("temporary_one_time_used", true);
+                saveLock(ctx, l);
+            }
             return true;
         }
-        if (now < l.optLong("temporary_until_ms", 0)) return true;
-        clearTemp(l); JSONObject s = state(ctx); locks(s).put(l.optString("package"), l); save(ctx, s); return false;
+        return true;
     }
 
     private static void clearTemp(JSONObject l) throws Exception {
-        l.put("temporary_active", false); l.put("temporary_type", ""); l.put("temporary_started_at_ms", 0); l.put("temporary_until_ms", 0);
-        l.put("temporary_window_until_ms", 0); l.put("temporary_allowed_ms", 0); l.put("temporary_used_ms", 0); l.put("temporary_session_started_ms", 0); l.put("temporary_one_time_used", false);
+        l.put("temporary_active", false);
+        l.put("temporary_decision", "");
+        l.put("temporary_type", "");
+        l.put("temporary_started_at_ms", 0);
+        l.put("temporary_created_at_ms", 0);
+        l.put("temporary_created_at_local", "");
+        l.put("temporary_until_ms", 0);
+        l.put("temporary_window_until_ms", 0);
+        l.put("temporary_expires_at_ms", 0);
+        l.put("temporary_expires_at_local", "");
+        l.put("temporary_allowed_ms", 0);
+        l.put("temporary_used_ms", 0);
+        l.put("temporary_session_started_ms", 0);
+        l.put("temporary_one_time_used", false);
+        l.put("temporary_reason", "");
+        l.put("temporary_source", "");
+        l.put("temporary_approved_by", "");
+        l.put("temporary_decision_id", "");
+        l.put("temporary_purpose", "");
     }
 
     public static boolean tryEmergencyUnlock(Context ctx, String pkg, String passphrase) {
@@ -479,7 +584,13 @@ public class AppGate {
             if (l == null) return false;
             String stored = l.optString("emergency_hash", "");
             if (stored.length() == 0 || !stored.equals(hash(passphrase == null ? "" : passphrase))) return false;
-            JSONObject cmd = new JSONObject(); cmd.put("package", pkg); cmd.put("minutes", Math.max(1, l.optInt("emergency_unlock_minutes", 5))); cmd.put("allow_type", "real_time");
+            JSONObject cmd = new JSONObject();
+            cmd.put("package", pkg);
+            cmd.put("minutes", Math.max(1, l.optInt("emergency_unlock_minutes", 5)));
+            cmd.put("allow_type", "real_time");
+            cmd.put("reason", "emergency_passphrase");
+            cmd.put("source", "local_emergency_passphrase");
+            cmd.put("approved_by", "user_local_emergency");
             temporaryUnlock(ctx, cmd); log(ctx, "紧急口令解锁成功：" + pkg);
             return true;
         } catch (Exception e) { return false; }
@@ -507,10 +618,105 @@ public class AppGate {
         } catch (Exception ignored) { }
     }
 
+    private static JSONObject temporaryDecisionJson(JSONObject l, long now) throws Exception {
+        JSONObject o = new JSONObject();
+        String pkg = l.optString("package", "");
+        long createdAt = l.optLong("temporary_created_at_ms", l.optLong("temporary_started_at_ms", 0));
+        long expiresAt = temporaryExpiresAt(l);
+        o.put("decision", "ALLOW");
+        o.put("package", pkg);
+        o.put("app_name", l.optString("app_name", pkg));
+        o.put("decision_id", l.optString("temporary_decision_id", ""));
+        o.put("type", l.optString("temporary_type", "real_time"));
+        o.put("purpose", l.optString("temporary_purpose", l.optString("temporary_type", "real_time")));
+        o.put("reason", l.optString("temporary_reason", ""));
+        o.put("source", l.optString("temporary_source", "legacy_app_gate"));
+        o.put("approved_by", l.optString("temporary_approved_by", ""));
+        o.put("created_at_ms", createdAt);
+        o.put("created_at_local", createdAt > 0 ? formatLocal(createdAt) : "");
+        o.put("start_at_ms", l.optLong("temporary_started_at_ms", createdAt));
+        o.put("expires_at_ms", expiresAt);
+        o.put("expires_at_local", expiresAt > 0 ? formatLocal(expiresAt) : "");
+        o.put("remaining_ms", expiresAt > 0 ? Math.max(0, expiresAt - now) : 0);
+        o.put("allowed_ms", l.optLong("temporary_allowed_ms", 0));
+        o.put("used_ms", l.optLong("temporary_used_ms", 0));
+        o.put("active", temporaryStillValid(l, now));
+        return o;
+    }
+
+    private static JSONObject lockDecisionJson(JSONObject l, long now) throws Exception {
+        JSONObject o = new JSONObject();
+        String pkg = l.optString("package", "");
+        long createdAt = l.optLong("created_at_ms", 0);
+        long expiresAt = l.optLong("locked_until_ms", 0);
+        o.put("decision", "LOCK");
+        o.put("package", pkg);
+        o.put("app_name", l.optString("app_name", pkg));
+        o.put("mode", l.optString("mode", "medium"));
+        o.put("reason", l.optString("reason", ""));
+        o.put("source", l.optString("source", "app_gate"));
+        o.put("created_at_ms", createdAt);
+        o.put("created_at_local", createdAt > 0 ? formatLocal(createdAt) : "");
+        o.put("expires_at_ms", expiresAt);
+        o.put("expires_at_local", expiresAt > 0 ? formatLocal(expiresAt) : "");
+        o.put("remaining_ms", expiresAt > 0 ? Math.max(0, expiresAt - now) : 0);
+        o.put("active", l.optBoolean("active", false) && expiresAt > now);
+        return o;
+    }
+
+    private static boolean cleanupExpiredTemporary(JSONObject s, long now) throws Exception {
+        boolean changed = false;
+        JSONObject ls = locks(s);
+        Iterator<String> it = ls.keys();
+        while (it.hasNext()) {
+            JSONObject l = ls.optJSONObject(it.next());
+            if (l == null || !l.optBoolean("temporary_active", false)) continue;
+            if (!temporaryStillValid(l, now)) {
+                clearTemp(l);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
     public static JSONObject config(Context ctx) {
         JSONObject out = new JSONObject();
         try {
-            out.put("enabled", enabled(ctx)); out.put("gate_apps", gateAppsJson(ctx)); out.put("state", state(ctx)); out.put("protected_packages", protectedJson(ctx));
+            long now = System.currentTimeMillis();
+            JSONObject s = state(ctx);
+            if (cleanupExpiredTemporary(s, now)) save(ctx, s);
+
+            JSONArray effectiveLocks = new JSONArray();
+            JSONArray effectiveAllows = new JSONArray();
+            JSONArray effectiveControls = new JSONArray();
+            JSONObject ls = locks(s);
+            Iterator<String> it = ls.keys();
+            while (it.hasNext()) {
+                String pkg = it.next();
+                JSONObject l = ls.optJSONObject(pkg);
+                if (l == null || !l.optBoolean("active", false) || now >= l.optLong("locked_until_ms", 0)) continue;
+                JSONObject lockView = lockDecisionJson(l, now);
+                effectiveLocks.put(lockView);
+                if (temporaryStillValid(l, now)) {
+                    JSONObject allowView = temporaryDecisionJson(l, now);
+                    effectiveAllows.put(allowView);
+                    effectiveControls.put(allowView);
+                } else {
+                    effectiveControls.put(lockView);
+                }
+            }
+
+            out.put("enabled", enabled(ctx));
+            out.put("gate_apps", gateAppsJson(ctx));
+            out.put("state", s);
+            out.put("effective_locks", effectiveLocks);
+            out.put("effective_allows", effectiveAllows);
+            out.put("effective_controls", effectiveControls);
+            out.put("effective_lock_count", effectiveLocks.length());
+            out.put("effective_allow_count", effectiveAllows.length());
+            out.put("updated_at_ms", now);
+            out.put("updated_at_local", formatLocal(now));
+            out.put("protected_packages", protectedJson(ctx));
         } catch (Exception ignored) { }
         return out;
     }
