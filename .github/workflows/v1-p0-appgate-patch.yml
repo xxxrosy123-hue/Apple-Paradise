@@ -1,0 +1,69 @@
+name: V1 P0 AppGate Patch
+
+on:
+  push:
+    branches:
+      - v1-dev
+    paths:
+      - 'scripts/v1_p0_apply_patch.py'
+      - '.github/workflows/v1-p0-appgate-patch.yml'
+      - 'android/app/src/main/java/dev/linjian/peek/AppGate.java'
+      - 'mcp/server.js'
+      - 'server/cloudflare-worker/worker.js'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply V1 P0 AppGate patch') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout v1-dev
+        uses: actions/checkout@v4
+        with:
+          ref: v1-dev
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Pull latest v1-dev
+        run: git pull --ff-only origin v1-dev
+
+      - name: Apply exact P0 replacements
+        run: python3 scripts/v1_p0_apply_patch.py
+
+      - name: Check JavaScript and Python syntax
+        run: |
+          node --check mcp/server.js
+          node --check server/cloudflare-worker/worker.js
+          python3 -m py_compile server/linjian_server.py scripts/v1_p0_apply_patch.py
+
+      - name: Run pure Java AppGate TTL tests
+        run: |
+          rm -rf /tmp/appgate-p0-test
+          mkdir -p /tmp/appgate-p0-test
+          javac -source 11 -target 11 -d /tmp/appgate-p0-test \
+            android/app/src/main/java/dev/linjian/peek/AppGateDecisionRules.java \
+            android/tests/AppGateDecisionRulesTest.java
+          java -cp /tmp/appgate-p0-test dev.linjian.peek.AppGateDecisionRulesTest
+
+      - name: Show focused diff
+        run: git diff --check && git diff -- android/app/src/main/java/dev/linjian/peek/AppGate.java mcp/server.js server/cloudflare-worker/worker.js
+
+      - name: Commit and push only to v1-dev
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add android/app/src/main/java/dev/linjian/peek/AppGate.java mcp/server.js server/cloudflare-worker/worker.js
+          if git diff --cached --quiet; then
+            echo "No P0 source changes to commit."
+            exit 0
+          fi
+          git commit -m "fix(appgate): Apply V1 P0 AppGate patch"
+          git pull --rebase origin v1-dev
+          git push origin HEAD:v1-dev
