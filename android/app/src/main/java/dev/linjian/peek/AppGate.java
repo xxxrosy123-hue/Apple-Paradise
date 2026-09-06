@@ -54,6 +54,8 @@ public class AppGate {
     private static volatile View overlayView = null;
     private static volatile WindowManager overlayWindowManager = null;
 
+    // Single-process consistency guard: every app_gate_state_v1 read-modify-write entrypoint
+    // is static synchronized, so two Android writers cannot save stale whole-object snapshots over each other.
     public static boolean enabled(Context ctx) { return AppPrefs.get(ctx).getBoolean(KEY_ENABLED, true); }
 
     private static JSONObject state(Context ctx) {
@@ -104,7 +106,7 @@ public class AppGate {
         return apps;
     }
 
-    public static JSONObject handleCommand(Context ctx, JSONObject cmd) {
+    public static synchronized JSONObject handleCommand(Context ctx, JSONObject cmd) {
         JSONObject out = new JSONObject();
         String action = cmd.optString("action", "");
         try {
@@ -169,7 +171,7 @@ public class AppGate {
         return value > 0 ? value : fallback;
     }
 
-    private static JSONObject lockApp(Context ctx, JSONObject cmd) throws Exception {
+    private static synchronized JSONObject lockApp(Context ctx, JSONObject cmd) throws Exception {
         String pkg = resolvePackage(ctx, cmd);
         if (!AppPrefs.isPackageLike(pkg)) return put(new JSONObject(), false, "package_invalid");
         if (isProtectedPackage(ctx, pkg)) return put(new JSONObject(), false, "protected_package:" + pkg);
@@ -180,29 +182,29 @@ public class AppGate {
         boolean revokeTemporaryAllow = cmd.optBoolean("revoke_temporary_allow", cmd.optBoolean("revokeTemporaryAllow", false));
         String revokedDecisionId = "";
         if (existing != null && existing.optBoolean("temporary_active", false)) {
-            if (!existing.optBoolean("active", false)) {
+            boolean baseLockActive = existing.optBoolean("active", false);
+            boolean temporaryEffective = baseLockActive && temporaryStillValid(existing, now);
+            AppGateDecisionRules.LockAttempt lockAttempt = AppGateDecisionRules.decideLockAttempt(
+                    baseLockActive, temporaryEffective, revokeTemporaryAllow);
+            if (!baseLockActive) {
                 // 兼容旧数据：门禁已经明确结束时，挂在旧 lock 上的 temporary_* 不再代表当前有效许可。
                 clearTemp(existing);
                 locks(s).put(pkg, existing);
                 save(ctx, s);
-            } else if (temporaryStillValid(existing, now)) {
-                if (!revokeTemporaryAllow) {
-                    JSONObject out = new JSONObject();
-                    long expiresAt = temporaryExpiresAt(existing);
-                    out.put("ok", false);
-                    out.put("error", "conflict_active_permission");
-                    out.put("package", pkg);
-                    out.put("active_permission", temporaryDecisionJson(existing, now));
-                    out.put("result", "conflict_active_permission:" + pkg + (expiresAt > 0 ? " until " + formatLocal(expiresAt) : ""));
-                    out.put("message", "已有仍有效的临时 ALLOW；普通重复锁定不会清除它。只有明确撤销时才传 revoke_temporary_allow=true。");
-                    log(ctx, "拒绝普通重复锁定：" + pkg + " 仍有有效临时放行");
-                    return out;
-                }
-                revokedDecisionId = existing.optString("temporary_decision_id", "");
-                clearTemp(existing);
-                locks(s).put(pkg, existing);
-                save(ctx, s);
+            } else if (lockAttempt == AppGateDecisionRules.LockAttempt.CONFLICT_ACTIVE_PERMISSION) {
+                JSONObject out = new JSONObject();
+                long expiresAt = temporaryExpiresAt(existing);
+                out.put("ok", false);
+                out.put("error", "conflict_active_permission");
+                out.put("package", pkg);
+                out.put("active_permission", temporaryDecisionJson(existing, now));
+                out.put("result", "conflict_active_permission:" + pkg + (expiresAt > 0 ? " until " + formatLocal(expiresAt) : ""));
+                out.put("message", "已有仍有效的临时 ALLOW；普通重复锁定不会清除它。只有具备明确撤销权限时才传 revoke_temporary_allow=true。");
+                log(ctx, "拒绝普通重复锁定：" + pkg + " 仍有有效临时放行");
+                return out;
             } else {
+                if (lockAttempt == AppGateDecisionRules.LockAttempt.REVOKE_ACTIVE_PERMISSION_AND_LOCK)
+                    revokedDecisionId = existing.optString("temporary_decision_id", "");
                 clearTemp(existing);
                 locks(s).put(pkg, existing);
                 save(ctx, s);
@@ -237,7 +239,7 @@ public class AppGate {
         return put(new JSONObject(), true, "locked_app:" + pkg + " until " + lock.optString("locked_until_local"));
     }
 
-    private static JSONObject unlockApp(Context ctx, JSONObject cmd, String why) throws Exception {
+    private static synchronized JSONObject unlockApp(Context ctx, JSONObject cmd, String why) throws Exception {
         String pkg = resolvePackage(ctx, cmd);
         JSONObject s = state(ctx); JSONObject l = locks(s).optJSONObject(pkg);
         if (l != null) {
@@ -251,7 +253,7 @@ public class AppGate {
         return put(new JSONObject(), true, "unlocked_app:" + pkg);
     }
 
-    private static JSONObject temporaryUnlock(Context ctx, JSONObject cmd) throws Exception {
+    private static synchronized JSONObject temporaryUnlock(Context ctx, JSONObject cmd) throws Exception {
         String pkg = resolvePackage(ctx, cmd);
         JSONObject s = state(ctx); JSONObject l = locks(s).optJSONObject(pkg);
         if (l == null) return put(new JSONObject(), false, "lock_not_found:" + pkg);
@@ -300,7 +302,7 @@ public class AppGate {
         return out;
     }
 
-    private static JSONObject extendLock(Context ctx, JSONObject cmd) throws Exception {
+    private static synchronized JSONObject extendLock(Context ctx, JSONObject cmd) throws Exception {
         String pkg = resolvePackage(ctx, cmd);
         JSONObject s = state(ctx); JSONObject l = locks(s).optJSONObject(pkg);
         if (l == null) return put(new JSONObject(), false, "lock_not_found:" + pkg);
@@ -321,7 +323,7 @@ public class AppGate {
         return put(new JSONObject(), true, "denied_unlock_request:" + pkg + ":" + msg);
     }
 
-    private static JSONObject setEmergencyPassphrase(Context ctx, JSONObject cmd) throws Exception {
+    private static synchronized JSONObject setEmergencyPassphrase(Context ctx, JSONObject cmd) throws Exception {
         String pkg = resolvePackage(ctx, cmd);
         String pass = cmd.optString("emergencyPassphrase", cmd.optString("emergency_passphrase", cmd.optString("passphrase", "")));
         if (pass.length() == 0) return put(new JSONObject(), false, "passphrase_empty");
@@ -331,7 +333,7 @@ public class AppGate {
         return put(new JSONObject(), true, "emergency_passphrase_set:" + pkg);
     }
 
-    public static void onForegroundPackage(Context ctx, String pkg) {
+    public static synchronized void onForegroundPackage(Context ctx, String pkg) {
         if (pkg == null || pkg.trim().isEmpty()) return;
         pkg = pkg.trim();
         if (!enabled(ctx)) return;
@@ -493,7 +495,7 @@ public class AppGate {
         if (!nextPkg.equals(prev)) { lastForegroundPackage = nextPkg; lastForegroundSince = now; }
     }
 
-    private static void addForegroundUsage(Context ctx, String pkg, long deltaMs) throws Exception {
+    private static synchronized void addForegroundUsage(Context ctx, String pkg, long deltaMs) throws Exception {
         if (deltaMs <= 0 || deltaMs > 60 * 60 * 1000) return;
         JSONObject s = state(ctx); JSONObject l = locks(s).optJSONObject(pkg);
         if (l == null || !l.optBoolean("temporary_active", false)) return;
@@ -502,7 +504,7 @@ public class AppGate {
         l.put("temporary_used_ms", used); l.put("temporary_session_started_ms", 0); save(ctx, s);
     }
 
-    public static JSONObject activeLockFor(Context ctx, String pkg, long now) throws Exception {
+    public static synchronized JSONObject activeLockFor(Context ctx, String pkg, long now) throws Exception {
         JSONObject s = state(ctx); JSONObject l = locks(s).optJSONObject(pkg);
         if (l == null || !l.optBoolean("active", false)) return null;
         if (now >= l.optLong("locked_until_ms", 0)) { l.put("active", false); save(ctx, s); log(ctx, "门禁到时自动解除：" + pkg); return null; }
@@ -537,13 +539,13 @@ public class AppGate {
                 l.optLong("temporary_window_until_ms", l.optLong("temporary_until_ms", 0)));
     }
 
-    private static void saveLock(Context ctx, JSONObject l) throws Exception {
+    private static synchronized void saveLock(Context ctx, JSONObject l) throws Exception {
         JSONObject s = state(ctx);
         locks(s).put(l.optString("package"), l);
         save(ctx, s);
     }
 
-    private static boolean isTemporarilyAllowed(Context ctx, JSONObject l, long now, boolean updateSession) throws Exception {
+    private static synchronized boolean isTemporarilyAllowed(Context ctx, JSONObject l, long now, boolean updateSession) throws Exception {
         if (!l.optBoolean("temporary_active", false)) return false;
         if (!temporaryStillValid(l, now)) {
             clearTemp(l);
@@ -591,7 +593,7 @@ public class AppGate {
         l.put("temporary_purpose", "");
     }
 
-    public static boolean tryEmergencyUnlock(Context ctx, String pkg, String passphrase) {
+    public static synchronized boolean tryEmergencyUnlock(Context ctx, String pkg, String passphrase) {
         try {
             JSONObject s = state(ctx); JSONObject l = locks(s).optJSONObject(pkg);
             if (l == null) return false;
@@ -609,7 +611,7 @@ public class AppGate {
         } catch (Exception e) { return false; }
     }
 
-    public static void submitUnlockRequest(final Context ctx, final String pkg, final String reason) {
+    public static synchronized void submitUnlockRequest(final Context ctx, final String pkg, final String reason) {
         try {
             JSONObject s = state(ctx); JSONObject req = new JSONObject();
             req.put("id", String.valueOf(System.currentTimeMillis())); req.put("device_id", AppPrefs.device(ctx)); req.put("package", pkg);
@@ -692,7 +694,7 @@ public class AppGate {
         return changed;
     }
 
-    public static JSONObject config(Context ctx) {
+    public static synchronized JSONObject config(Context ctx) {
         JSONObject out = new JSONObject();
         try {
             long now = System.currentTimeMillis();
@@ -708,13 +710,15 @@ public class AppGate {
                 String pkg = it.next();
                 JSONObject l = ls.optJSONObject(pkg);
                 if (l == null || !l.optBoolean("active", false) || now >= l.optLong("locked_until_ms", 0)) continue;
-                JSONObject lockView = lockDecisionJson(l, now);
-                effectiveLocks.put(lockView);
-                if (temporaryStillValid(l, now)) {
+                boolean temporaryEffective = temporaryStillValid(l, now);
+                AppGateDecisionRules.EffectiveView view = AppGateDecisionRules.composeEffectiveView(true, temporaryEffective);
+                if (view.includeAllow) {
                     JSONObject allowView = temporaryDecisionJson(l, now);
                     effectiveAllows.put(allowView);
                     effectiveControls.put(allowView);
-                } else {
+                } else if (view.includeLock) {
+                    JSONObject lockView = lockDecisionJson(l, now);
+                    effectiveLocks.put(lockView);
                     effectiveControls.put(lockView);
                 }
             }
@@ -839,7 +843,7 @@ public class AppGate {
 
     private static JSONObject put(JSONObject out, boolean ok, String result) { try { out.put("ok", ok); out.put("result", result); } catch (Exception ignored) { } return out; }
 
-    private static void log(Context ctx, String msg) {
+    private static synchronized void log(Context ctx, String msg) {
         DebugState.append(ctx, "应用门禁：" + msg);
         try {
             JSONObject s = state(ctx); JSONArray logs = s.optJSONArray("logs"); if (logs == null) logs = new JSONArray();

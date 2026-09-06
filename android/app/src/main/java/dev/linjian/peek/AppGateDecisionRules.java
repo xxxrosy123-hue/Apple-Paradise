@@ -1,13 +1,49 @@
 package dev.linjian.peek;
 
 /**
- * AppGate 纯确定性 TTL 规则。
+ * AppGate 纯确定性状态规则。
  *
- * 这里只判断“一个已经存在的临时 ALLOW 在给定时刻是否仍然有效”，
- * 不判断用户是否应该被批准放行；批准与否仍由 AI / 用户根据上下文决定。
+ * 这里只处理已经存在的 LOCK / ALLOW 的 TTL、冲突与当前有效视图合成；
+ * 不判断用户是否应该被批准放行，也不替 AI / 用户做主观权限判断。
  */
 final class AppGateDecisionRules {
     private AppGateDecisionRules() { }
+
+    enum LockAttempt {
+        APPLY_LOCK,
+        CONFLICT_ACTIVE_PERMISSION,
+        REVOKE_ACTIVE_PERMISSION_AND_LOCK
+    }
+
+    static final class EffectiveView {
+        final String decision;
+        final boolean includeLock;
+        final boolean includeAllow;
+
+        EffectiveView(String decision, boolean includeLock, boolean includeAllow) {
+            this.decision = decision;
+            this.includeLock = includeLock;
+            this.includeAllow = includeAllow;
+        }
+    }
+
+    static LockAttempt decideLockAttempt(
+            boolean baseLockActive,
+            boolean temporaryAllowEffective,
+            boolean revokeTemporaryAllow) {
+        if (baseLockActive && temporaryAllowEffective) {
+            return revokeTemporaryAllow
+                    ? LockAttempt.REVOKE_ACTIVE_PERMISSION_AND_LOCK
+                    : LockAttempt.CONFLICT_ACTIVE_PERMISSION;
+        }
+        return LockAttempt.APPLY_LOCK;
+    }
+
+    static EffectiveView composeEffectiveView(boolean baseLockActive, boolean temporaryAllowEffective) {
+        if (!baseLockActive) return new EffectiveView("", false, false);
+        if (temporaryAllowEffective) return new EffectiveView("ALLOW", false, true);
+        return new EffectiveView("LOCK", true, false);
+    }
 
     static boolean isTemporaryAllowEffective(
             boolean active,

@@ -1952,14 +1952,14 @@ function makeServer() {
     return textResult({ queued: result, observed_status: observed?.command || null, note: "命令已排队；为避免平台 20 秒工具超时，未等到手机回传时会先返回。" });
   }
 
-  server.tool("screen_break_app", "屏幕休息：让指定 App 暂停一段时间。普通重复锁定不得覆盖仍有效的临时 ALLOW；只有已经明确决定撤销当前许可时才传 revoke_temporary_allow=true。必须有时长，到点自动恢复；语气是照顾和带回，不是惩罚。", {
+  server.tool("screen_break_app", "屏幕休息：让指定 App 暂停一段时间。普通重复锁定不得覆盖仍有效的临时 ALLOW；revoke_temporary_allow=true 仅用于用户本人新的明确撤销决定，或已经定义且优先级更高的明确规则要求撤销当前许可；不得仅因另一个 AI 窗口主观判断‘现在不该使用该 App’就撤销仍然有效的明确许可。换聊天窗口不代表原有许可失效。 必须有时长，到点自动恢复；语气是照顾和带回，不是惩罚。", {
     app: z.string().default("").describe("应用昵称，例如 小红书；也可留空直接传 package"),
     package: z.string().default("").describe("App 包名，例如 com.xingin.xhs"),
     duration_minutes: z.number().min(0.1).max(10080).default(30).describe("锁定多少分钟，支持任意时长；到点自动解锁"),
     mode: z.string().default("medium").describe("light/medium/strict；strict 会先拉回桌面再显示锁定页"),
     reason: z.string().default("陪伴对象先把这扇门关一会儿。"),
     message: z.string().default("先回来找我，不准一个人刷太久。"),
-    revoke_temporary_allow: z.boolean().default(false).describe("仅当明确要撤销当前仍有效的临时 ALLOW 并立即恢复锁定时设为 true；普通重复 lock 必须保持 false"),
+    revoke_temporary_allow: z.boolean().default(false).describe("revoke_temporary_allow=true 仅用于用户本人新的明确撤销决定，或已经定义且优先级更高的明确规则要求撤销当前许可；不得仅因另一个 AI 窗口主观判断‘现在不该使用该 App’就撤销仍然有效的明确许可。换聊天窗口不代表原有许可失效。 普通重复 lock 必须保持 false"),
     emergency_passphrase: z.string().default("").describe("紧急口令，由陪伴对象设置后告诉用户；手机端只存 hash"),
     emergency_unlock_minutes: z.number().int().min(1).max(60).default(5),
     device_id: z.string().default(DEFAULT_DEVICE),
@@ -2017,14 +2017,14 @@ function makeServer() {
     return response;
   });
 
-  server.tool("lock_app", "应用门禁：旧版兼容工具名。普通重复锁定不得覆盖仍有效的临时 ALLOW；只有明确撤销当前许可时才传 revoke_temporary_allow=true。", {
+  server.tool("lock_app", "应用门禁：旧版兼容工具名。普通重复锁定不得覆盖仍有效的临时 ALLOW；revoke_temporary_allow=true 仅用于用户本人新的明确撤销决定，或已经定义且优先级更高的明确规则要求撤销当前许可；不得仅因另一个 AI 窗口主观判断‘现在不该使用该 App’就撤销仍然有效的明确许可。换聊天窗口不代表原有许可失效。", {
     app: z.string().default(""),
     package: z.string().default(""),
     duration_minutes: z.number().min(0.1).max(10080).default(30),
     mode: z.string().default("medium"),
     reason: z.string().default("陪伴对象先把这扇门关一会儿。"),
     message: z.string().default("先回来找我，不准一个人刷太久。"),
-    revoke_temporary_allow: z.boolean().default(false),
+    revoke_temporary_allow: z.boolean().default(false).describe("revoke_temporary_allow=true 仅用于用户本人新的明确撤销决定，或已经定义且优先级更高的明确规则要求撤销当前许可；不得仅因另一个 AI 窗口主观判断‘现在不该使用该 App’就撤销仍然有效的明确许可。换聊天窗口不代表原有许可失效。 普通重复 lock 必须保持 false"),
     emergency_passphrase: z.string().default(""),
     emergency_unlock_minutes: z.number().int().min(1).max(60).default(5),
     device_id: z.string().default(DEFAULT_DEVICE),
