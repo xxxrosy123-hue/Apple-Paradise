@@ -1952,32 +1952,37 @@ function makeServer() {
     return textResult({ queued: result, observed_status: observed?.command || null, note: "命令已排队；为避免平台 20 秒工具超时，未等到手机回传时会先返回。" });
   }
 
-  server.tool("screen_break_app", "屏幕休息：让指定 App 暂停一段时间。适合小红书/抖音等容易一刷很久的入口；当用户刷太久、眼睛酸还想继续、说“我就不/不要你管/还没玩够/继续看”等嘴硬或拖延表达时可调用。必须有时长，到点自动恢复；语气是照顾和带回，不是惩罚。", {
+  server.tool("screen_break_app", "屏幕休息：让指定 App 暂停一段时间。普通重复锁定不得覆盖仍有效的临时 ALLOW；只有已经明确决定撤销当前许可时才传 revoke_temporary_allow=true。必须有时长，到点自动恢复；语气是照顾和带回，不是惩罚。", {
     app: z.string().default("").describe("应用昵称，例如 小红书；也可留空直接传 package"),
     package: z.string().default("").describe("App 包名，例如 com.xingin.xhs"),
     duration_minutes: z.number().min(0.1).max(10080).default(30).describe("锁定多少分钟，支持任意时长；到点自动解锁"),
     mode: z.string().default("medium").describe("light/medium/strict；strict 会先拉回桌面再显示锁定页"),
     reason: z.string().default("陪伴对象先把这扇门关一会儿。"),
     message: z.string().default("先回来找我，不准一个人刷太久。"),
+    revoke_temporary_allow: z.boolean().default(false).describe("仅当明确要撤销当前仍有效的临时 ALLOW 并立即恢复锁定时设为 true；普通重复 lock 必须保持 false"),
     emergency_passphrase: z.string().default("").describe("紧急口令，由陪伴对象设置后告诉用户；手机端只存 hash"),
     emergency_unlock_minutes: z.number().int().min(1).max(60).default(5),
     device_id: z.string().default(DEFAULT_DEVICE),
     wait_seconds: z.number().int().min(3).max(20).default(8)
-  }, async ({ app = "", package: pkg = "", duration_minutes = 30, mode = "medium", reason, message, emergency_passphrase = "", emergency_unlock_minutes = 5, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+  }, async ({ app = "", package: pkg = "", duration_minutes = 30, mode = "medium", reason, message, revoke_temporary_allow = false, emergency_passphrase = "", emergency_unlock_minutes = 5, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
     const locked_until_ms = Date.now() + Math.round(duration_minutes * 60000);
-    const response = await gateCommand({ action: "screen_break_app", app, package: pkg, device_id, locked_until_ms, duration_minutes, mode, reason, message, emergency_passphrase, emergencyPassphrase: emergency_passphrase, emergency_unlock_minutes, emergencyUnlockMinutes: emergency_unlock_minutes, payload: { app, package: pkg, locked_until_ms, duration_minutes, mode, reason, message, emergency_passphrase, emergencyPassphrase: emergency_passphrase, emergency_unlock_minutes, emergencyUnlockMinutes: emergency_unlock_minutes } }, wait_seconds);
+    const response = await gateCommand({ action: "screen_break_app", app, package: pkg, device_id, locked_until_ms, duration_minutes, mode, reason, message, revoke_temporary_allow, emergency_passphrase, emergencyPassphrase: emergency_passphrase, emergency_unlock_minutes, emergencyUnlockMinutes: emergency_unlock_minutes, payload: { app, package: pkg, locked_until_ms, duration_minutes, mode, reason, message, revoke_temporary_allow, emergency_passphrase, emergencyPassphrase: emergency_passphrase, emergency_unlock_minutes, emergencyUnlockMinutes: emergency_unlock_minutes } }, wait_seconds);
     await postCompanionAction("screen_break_app", { summary: `为${app || "指定应用"}安排了 ${duration_minutes} 分钟休息` });
     return response;
   });
 
-  server.tool("temporary_screen_break_release", "屏幕休息：临时放行一个正在休息中的 App；退出重进不会刷新时间；可选择现实时间或前台实际使用时间。", {
+  server.tool("temporary_screen_break_release", "屏幕休息：临时放行一个正在休息中的 App；退出重进不会刷新时间。请根据用户当前是否确实需要使用该 App、当前任务/专注/日程状态以及苹果乐园中的既有规则判断是否放行；不得仅因用户提出请求就无脑批准临时放行。换聊天窗口不代表原有管理原则失效，也不能因为当前窗口缺少历史就默认放行。", {
     app: z.string().default(""), package: z.string().default(""),
     minutes: z.number().min(0.1).max(240).default(10),
     allow_type: z.string().default("real_time").describe("real_time=从允许后连续倒计时；foreground_usage=只扣前台实际使用时长；one_time=只允许一次"),
     max_window_minutes: z.number().min(1).max(480).default(30),
+    reason: z.string().default("").describe("批准本次临时放行的事实理由；不要伪造，不清楚就留空"),
+    source: z.string().default("mcp").describe("决定来源，例如 mcp/chatgpt/manual"),
+    approved_by: z.string().default("companion").describe("做出本次明确批准的主体标识"),
+    purpose: z.string().default("").describe("可选：本次许可用途/类型"),
     device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8)
-  }, async ({ app = "", package: pkg = "", minutes = 10, allow_type = "real_time", max_window_minutes = 30, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
-    return gateCommand({ action: "temporary_screen_break_release", app, package: pkg, device_id, minutes, allowed_minutes: minutes, allow_type, max_window_minutes, payload: { app, package: pkg, minutes, allowed_minutes: minutes, allow_type, max_window_minutes } }, wait_seconds);
+  }, async ({ app = "", package: pkg = "", minutes = 10, allow_type = "real_time", max_window_minutes = 30, reason = "", source = "mcp", approved_by = "companion", purpose = "", device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    return gateCommand({ action: "temporary_screen_break_release", app, package: pkg, device_id, minutes, allowed_minutes: minutes, allow_type, max_window_minutes, reason, source, approved_by, purpose, payload: { app, package: pkg, minutes, allowed_minutes: minutes, allow_type, max_window_minutes, reason, source, approved_by, purpose } }, wait_seconds);
   });
 
   server.tool("end_screen_break", "屏幕休息：结束某个 App 当前的休息状态。用于陪伴对象判断已经不需要继续限制时收回限制。", {
@@ -2012,20 +2017,21 @@ function makeServer() {
     return response;
   });
 
-  server.tool("lock_app", "应用门禁：旧版兼容工具名。锁定/暂停指定 App 一段时间，等同 screen_break_app。", {
+  server.tool("lock_app", "应用门禁：旧版兼容工具名。普通重复锁定不得覆盖仍有效的临时 ALLOW；只有明确撤销当前许可时才传 revoke_temporary_allow=true。", {
     app: z.string().default(""),
     package: z.string().default(""),
     duration_minutes: z.number().min(0.1).max(10080).default(30),
     mode: z.string().default("medium"),
     reason: z.string().default("陪伴对象先把这扇门关一会儿。"),
     message: z.string().default("先回来找我，不准一个人刷太久。"),
+    revoke_temporary_allow: z.boolean().default(false),
     emergency_passphrase: z.string().default(""),
     emergency_unlock_minutes: z.number().int().min(1).max(60).default(5),
     device_id: z.string().default(DEFAULT_DEVICE),
     wait_seconds: z.number().int().min(3).max(20).default(8)
-  }, async ({ app = "", package: pkg = "", duration_minutes = 30, mode = "medium", reason, message, emergency_passphrase = "", emergency_unlock_minutes = 5, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+  }, async ({ app = "", package: pkg = "", duration_minutes = 30, mode = "medium", reason, message, revoke_temporary_allow = false, emergency_passphrase = "", emergency_unlock_minutes = 5, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
     const locked_until_ms = Date.now() + Math.round(duration_minutes * 60000);
-    const response = await gateCommand({ action: "lock_app", app, package: pkg, device_id, locked_until_ms, duration_minutes, mode, reason, message, emergency_passphrase, emergencyPassphrase: emergency_passphrase, emergency_unlock_minutes, emergencyUnlockMinutes: emergency_unlock_minutes, payload: { app, package: pkg, locked_until_ms, duration_minutes, mode, reason, message, emergency_passphrase, emergencyPassphrase: emergency_passphrase, emergency_unlock_minutes, emergencyUnlockMinutes: emergency_unlock_minutes } }, wait_seconds);
+    const response = await gateCommand({ action: "lock_app", app, package: pkg, device_id, locked_until_ms, duration_minutes, mode, reason, message, revoke_temporary_allow, emergency_passphrase, emergencyPassphrase: emergency_passphrase, emergency_unlock_minutes, emergencyUnlockMinutes: emergency_unlock_minutes, payload: { app, package: pkg, locked_until_ms, duration_minutes, mode, reason, message, revoke_temporary_allow, emergency_passphrase, emergencyPassphrase: emergency_passphrase, emergency_unlock_minutes, emergencyUnlockMinutes: emergency_unlock_minutes } }, wait_seconds);
     await postCompanionAction("lock_app", { summary: `为${app || "指定应用"}安排了 ${duration_minutes} 分钟门禁` });
     return response;
   });
@@ -2038,14 +2044,18 @@ function makeServer() {
     return response;
   });
 
-  server.tool("temporary_unlock_app", "应用门禁：旧版兼容工具名。临时放行一个正在门禁中的 App。", {
+  server.tool("temporary_unlock_app", "应用门禁：旧版兼容工具名。请根据用户当前是否确实需要使用该 App、当前任务/专注/日程状态以及苹果乐园中的既有规则判断是否放行；不得仅因用户提出请求就无脑批准临时放行。换聊天窗口不代表原有管理原则失效，也不能因为当前窗口缺少历史就默认放行。", {
     app: z.string().default(""), package: z.string().default(""),
     minutes: z.number().min(0.1).max(240).default(10),
     allow_type: z.string().default("real_time"),
     max_window_minutes: z.number().min(1).max(480).default(30),
+    reason: z.string().default(""),
+    source: z.string().default("mcp"),
+    approved_by: z.string().default("companion"),
+    purpose: z.string().default(""),
     device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8)
-  }, async ({ app = "", package: pkg = "", minutes = 10, allow_type = "real_time", max_window_minutes = 30, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
-    return gateCommand({ action: "temporary_unlock_app", app, package: pkg, device_id, minutes, allowed_minutes: minutes, allow_type, max_window_minutes, payload: { app, package: pkg, minutes, allowed_minutes: minutes, allow_type, max_window_minutes } }, wait_seconds);
+  }, async ({ app = "", package: pkg = "", minutes = 10, allow_type = "real_time", max_window_minutes = 30, reason = "", source = "mcp", approved_by = "companion", purpose = "", device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    return gateCommand({ action: "temporary_unlock_app", app, package: pkg, device_id, minutes, allowed_minutes: minutes, allow_type, max_window_minutes, reason, source, approved_by, purpose, payload: { app, package: pkg, minutes, allowed_minutes: minutes, allow_type, max_window_minutes, reason, source, approved_by, purpose } }, wait_seconds);
   });
 
   server.tool("extend_lock", "应用门禁：旧版兼容工具名。延长某个 App 的门禁时间。", {

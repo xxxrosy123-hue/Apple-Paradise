@@ -178,8 +178,14 @@ public class AppGate {
         JSONObject s = state(ctx);
         JSONObject existing = locks(s).optJSONObject(pkg);
         boolean revokeTemporaryAllow = cmd.optBoolean("revoke_temporary_allow", cmd.optBoolean("revokeTemporaryAllow", false));
+        String revokedDecisionId = "";
         if (existing != null && existing.optBoolean("temporary_active", false)) {
-            if (temporaryStillValid(existing, now)) {
+            if (!existing.optBoolean("active", false)) {
+                // 兼容旧数据：门禁已经明确结束时，挂在旧 lock 上的 temporary_* 不再代表当前有效许可。
+                clearTemp(existing);
+                locks(s).put(pkg, existing);
+                save(ctx, s);
+            } else if (temporaryStillValid(existing, now)) {
                 if (!revokeTemporaryAllow) {
                     JSONObject out = new JSONObject();
                     long expiresAt = temporaryExpiresAt(existing);
@@ -192,11 +198,10 @@ public class AppGate {
                     log(ctx, "拒绝普通重复锁定：" + pkg + " 仍有有效临时放行");
                     return out;
                 }
-                String decisionId = existing.optString("temporary_decision_id", "");
+                revokedDecisionId = existing.optString("temporary_decision_id", "");
                 clearTemp(existing);
                 locks(s).put(pkg, existing);
                 save(ctx, s);
-                log(ctx, "明确撤销临时放行：" + pkg + (decisionId.length() > 0 ? " decision=" + decisionId : ""));
             } else {
                 clearTemp(existing);
                 locks(s).put(pkg, existing);
@@ -226,6 +231,8 @@ public class AppGate {
         clearTemp(lock);
         locks(s).put(pkg, lock); save(ctx, s);
         addGateApp(ctx, lock.optString("app_name", labelOf(ctx, pkg)), pkg);
+        if (revokedDecisionId.length() > 0) log(ctx, "明确撤销临时放行：" + pkg + " decision=" + revokedDecisionId);
+        else if (revokeTemporaryAllow) log(ctx, "明确撤销临时放行后重新锁定：" + pkg);
         log(ctx, "锁定 " + lock.optString("app_name") + " 到 " + lock.optString("locked_until_local") + "：" + lock.optString("reason"));
         return put(new JSONObject(), true, "locked_app:" + pkg + " until " + lock.optString("locked_until_local"));
     }
@@ -233,7 +240,13 @@ public class AppGate {
     private static JSONObject unlockApp(Context ctx, JSONObject cmd, String why) throws Exception {
         String pkg = resolvePackage(ctx, cmd);
         JSONObject s = state(ctx); JSONObject l = locks(s).optJSONObject(pkg);
-        if (l != null) { l.put("active", false); l.put("unlocked_at_ms", System.currentTimeMillis()); l.put("unlock_reason", why); }
+        if (l != null) {
+            l.put("active", false);
+            l.put("unlocked_at_ms", System.currentTimeMillis());
+            l.put("unlock_reason", why);
+            // unlock_app/end_screen_break 是明确结束当前门禁；关联的临时 ALLOW 也随这次控制一起结束。
+            clearTemp(l);
+        }
         save(ctx, s); log(ctx, "解除门禁：" + pkg + "（" + why + "）");
         return put(new JSONObject(), true, "unlocked_app:" + pkg);
     }
@@ -671,7 +684,7 @@ public class AppGate {
         while (it.hasNext()) {
             JSONObject l = ls.optJSONObject(it.next());
             if (l == null || !l.optBoolean("temporary_active", false)) continue;
-            if (!temporaryStillValid(l, now)) {
+            if (!l.optBoolean("active", false) || !temporaryStillValid(l, now)) {
                 clearTemp(l);
                 changed = true;
             }
