@@ -96,6 +96,7 @@ public class LifeState {
             state.put("known_apps", AppPrefs.knownAppsJson(ctx));
             state.put("app_gate", AppGate.config(ctx));
             state.put("focus_mode", FocusMode.config(ctx));
+            state.put("todo_state", TodoState.collect(ctx));
             state.put("cycle_state", CycleState.collect(ctx));
             state.put("calendar_state", CalendarState.collect(ctx));
             state.put("wallet_state", WalletState.collect(ctx));
@@ -132,6 +133,7 @@ public class LifeState {
             sb.append("\n\n").append(HomeMode.pretty(ctx));
             sb.append("\n\n").append(AppGate.pretty(ctx));
             sb.append("\n\n").append(FocusMode.pretty(ctx));
+            sb.append("\n\n").append(TodoState.pretty(ctx));
             sb.append("\n\n").append(NowState.pretty(ctx));
             sb.append("\n\n可打开 App：\n").append(AppPrefs.knownAppsText(ctx));
             sb.append("\n\n").append(CycleState.pretty(ctx));

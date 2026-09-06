@@ -1012,6 +1012,7 @@ function makeServer() {
     "temporary_screen_break_release", "end_screen_break", "extend_screen_break", "deny_screen_break_release_request",
     "get_screen_break_state", "get_lock_state", "lock_app", "unlock_app", "temporary_unlock_app", "extend_lock", "deny_unlock_request",
     "list_screen_break_apps", "list_lockable_apps", "add_screen_break_app", "add_locked_app", "remove_locked_app", "set_screen_break_passphrase", "set_emergency_passphrase",
+    "todo_action", "get_todos",
     "get_focus_status", "start_focus_mode", "end_focus_mode", "set_focus_plan", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock", "request_focus_unlock", "create_focus_request",
     "get_wallet_month_state", "add_wallet_record", "list_wallet_pending", "submit_wallet_approval", "submit_companion_wallet_request", "list_companion_wallet_requests", "list_wallet_request_results", "confirm_wallet_record",
     "decide_wallet_approval", "save_wallet_request_result", "update_wallet_request_result", "save_user_wallet_request_result", "edit_wallet_record", "delete_wallet_record", "set_wallet_rules", "wallet_approval_request", "get_takeout_state", "set_takeout_budget", "set_takeout_preferences", "add_takeout_card", "save_takeout_card", "update_takeout_card", "remove_takeout_card", "delete_takeout_card", "list_takeout_cards", "list_takeout_meals", "remember_takeout_meal", "remember_current_takeout_meal", "suggest_takeout_options", "create_takeout_plan", "takeout_wallet_request", "open_takeout_link", "open_takeout_plan", "copy_takeout_note", "record_takeout_order", "prepare_takeout_checkout", "auto_takeout_checkout", "get_takeout_checkout_status", "cancel_takeout_checkout"
@@ -1036,6 +1037,49 @@ function makeServer() {
     }
     return originalTool(...args);
   };
+
+
+  async function runTodoCommand(action, args = {}, waitSeconds = DEFAULT_COMMAND_WAIT_SECONDS) {
+    const device_id = args.device_id || DEFAULT_DEVICE;
+    const clean = { ...args };
+    delete clean.device_id;
+    delete clean.wait_seconds;
+    const queued = await postCommand({ action, device_id, ...clean, payload: { ...clean } });
+    const id = queued?.command?.id;
+    const observed = id ? await waitCommand(id, waitSeconds) : null;
+    const command = observed?.command || queued?.command || null;
+    return {
+      ok: command?.status === "completed",
+      queued,
+      observed_status: command,
+      phone_result: parsePhoneResult(command),
+      source_of_truth: "android_local:todo_state_v1",
+      note: "Todo 正式事实保存在手机本地；Server 只传输命令和保存最近 LifeState 快照。"
+    };
+  }
+
+  server.tool("get_todos", "读取苹果乐园 Android 本地持久化的 Todo 正式事实。Todo 是所有聊天窗口共享的真实任务状态；filter 支持 all/open/completed/overdue/due_today。due_today 仅表示 deadline 的本地日期是今天，不等于‘计划今天做’。", {
+    filter: z.enum(["all", "open", "completed", "overdue", "due_today"]).default("all"),
+    id: z.string().optional(),
+    category: z.string().optional(),
+    status: z.enum(["open", "completed"]).optional(),
+    device_id: z.string().default(DEFAULT_DEVICE),
+    wait_seconds: z.number().int().min(3).max(20).default(8)
+  }, async (args) => textResult(await runTodoCommand("get_todos", args, args.wait_seconds)));
+
+  server.tool("todo_action", "创建、修改、完成、重新打开或删除苹果乐园 Todo。Todo 是用户当前真实任务的正式共享事实；这些写操作会改变所有聊天窗口之后读到的状态。不得仅因当前聊天窗口主观猜测‘应该做完了’就擅自 complete/delete；只有用户明确表达或可靠事实足以确认时才执行状态修改。", {
+    operation: z.enum(["create", "update", "complete", "reopen", "delete"]),
+    id: z.string().optional().describe("update/complete/reopen/delete 必填；create 由手机生成稳定唯一 id"),
+    title: z.string().optional().describe("create 必填；update 仅在明确要改标题时传"),
+    note: z.string().optional(),
+    category: z.string().optional().describe("自由分类字符串，不限制为固定枚举"),
+    priority: z.string().optional().describe("最小优先级字段；默认 normal，数据层允许以后扩展"),
+    deadline_at_ms: z.number().nonnegative().optional(),
+    deadline: z.string().optional().describe("可用 yyyy-MM-dd、yyyy-MM-dd HH:mm 或带时区 ISO 时间；纯日期按本地当天 23:59:59.999"),
+    clear_deadline: z.boolean().optional().describe("明确清除 deadline 时传 true"),
+    device_id: z.string().default(DEFAULT_DEVICE),
+    wait_seconds: z.number().int().min(3).max(20).default(8)
+  }, async (args) => textResult(await runTodoCommand("todo_action", args, args.wait_seconds)));
 
 
   // v0.3.8.2：专注模式工具靠前注册，避免部分客户端只读取前若干个 schema 时漏掉接口。

@@ -197,6 +197,14 @@ public class CompanionService extends Service {
                 try { reportCommand(ctx, serverUrl, token, id, true, result); uploadStateThrottled(serverUrl, token, ctx, false); } catch (Exception ignored) { }
                 return;
             }
+            if (TodoState.isTodoAction(action)) {
+                JSONObject rr = TodoState.handleCommand(ctx, cmd);
+                boolean ok = rr.optBoolean("ok", false);
+                String result = rr.toString();
+                DebugState.append(ctx, "执行 Todo 命令 " + action + "：" + rr.optString("result", result));
+                try { reportCommand(ctx, serverUrl, token, id, ok, result); uploadStateThrottled(serverUrl, token, ctx, true); } catch (Exception ignored) { }
+                return;
+            }
             if (FocusMode.isFocusAction(action)) {
                 Context focusCtx = ScreenshotService.getInstance() != null ? ScreenshotService.getInstance() : ctx;
                 JSONObject rr = FocusMode.handleCommand(focusCtx, cmd);
