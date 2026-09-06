@@ -1,5 +1,6 @@
 export const CURRENT_CONTEXT_SCHEMA_VERSION = 1;
 export const CURRENT_CONTEXT_STALE_AFTER_MS = 30000;
+export const CURRENT_CONTEXT_FUTURE_SKEW_TOLERANCE_MS = 5000;
 export const CURRENT_CONTEXT_TODO_LIST_LIMIT = 8;
 
 function isObject(value) {
@@ -31,15 +32,20 @@ function copyKnown(source, keys) {
 
 function freshnessEntry(updatedAtMs, nowMs, source, transport, staleAfterMs) {
   const timestamp = positiveNumberOrNull(updatedAtMs);
-  const ageMs = timestamp === null ? null : Math.max(0, nowMs - timestamp);
-  return {
+  const futureByMs = timestamp === null ? null : timestamp - nowMs;
+  const clockSkew = futureByMs !== null && futureByMs > CURRENT_CONTEXT_FUTURE_SKEW_TOLERANCE_MS;
+  const ageMs = timestamp === null || clockSkew ? null : Math.max(0, nowMs - timestamp);
+  const out = {
     source,
     transport,
     updated_at_ms: timestamp,
     age_ms: ageMs,
     stale_after_ms: staleAfterMs,
-    stale: ageMs === null || ageMs >= staleAfterMs
+    stale: ageMs === null || ageMs >= staleAfterMs,
+    clock_skew: clockSkew
   };
+  if (clockSkew) out.future_by_ms = futureByMs;
+  return out;
 }
 
 function normalizeDecision(decision) {
@@ -62,22 +68,19 @@ function sanitizeControl(raw) {
 }
 
 function authoritativeControls(appGate) {
-  if (!isObject(appGate)) return [];
-  const explicit = Array.isArray(appGate.effective_controls) ? appGate.effective_controls : null;
-  const source = explicit || [
-    ...(Array.isArray(appGate.effective_allows) ? appGate.effective_allows : []),
-    ...(Array.isArray(appGate.effective_locks) ? appGate.effective_locks : [])
-  ];
-  const byPackage = new Map();
-  for (const item of source) {
+  if (!isObject(appGate) || !Array.isArray(appGate.effective_controls)) return null;
+  const controls = [];
+  for (const item of appGate.effective_controls) {
     const control = sanitizeControl(item);
-    if (!control) continue;
-    const previous = byPackage.get(control.package);
-    if (!previous || (control.decision === "ALLOW" && previous.decision !== "ALLOW")) {
-      byPackage.set(control.package, control);
-    }
+    if (!control) return null;
+    controls.push(control);
   }
-  return Array.from(byPackage.values());
+  return controls;
+}
+
+function diagnosticControls(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(sanitizeControl).filter(Boolean);
 }
 
 function compactTodo(raw) {
@@ -131,8 +134,14 @@ function sortRelevantTodos(a, b) {
 }
 
 function composeTodo(todoState, localDate, nowMs) {
-  const rawTodos = isObject(todoState) && Array.isArray(todoState.todos) ? todoState.todos : [];
-  const all = rawTodos.map(compactTodo).filter(Boolean).map((todo) => {
+  const updated = positiveNumberOrNull(todoState?.updated_at_ms);
+  if (!isObject(todoState) || !Array.isArray(todoState.todos)) {
+    const unavailable = { available: false };
+    if (isObject(todoState)) unavailable.degraded = true;
+    if (updated !== null) unavailable.state_updated_at_ms = updated;
+    return unavailable;
+  }
+  const all = todoState.todos.map(compactTodo).filter(Boolean).map((todo) => {
     todo.due_today = todoDueToday(todo, localDate);
     todo.overdue = todoOverdue(todo, nowMs);
     return todo;
@@ -143,6 +152,7 @@ function composeTodo(todoState, localDate, nowMs) {
   const openDueToday = open.filter((todo) => todo.due_today).sort(sortRelevantTodos);
   const relevant = [...open].sort(sortRelevantTodos);
   const out = {
+    available: true,
     open_count: open.length,
     overdue_count: overdue.length,
     due_today_count: dueToday.length,
@@ -151,7 +161,6 @@ function composeTodo(todoState, localDate, nowMs) {
     open_due_today: openDueToday.slice(0, CURRENT_CONTEXT_TODO_LIST_LIMIT),
     relevant_open_todos: relevant.slice(0, CURRENT_CONTEXT_TODO_LIST_LIMIT)
   };
-  const updated = positiveNumberOrNull(todoState?.updated_at_ms);
   if (updated !== null) out.state_updated_at_ms = updated;
   return out;
 }
@@ -174,30 +183,42 @@ function composeDevice(state) {
 }
 
 function composeAppGate(appGate) {
+  if (!isObject(appGate)) return { available: false, authoritative: false };
   const controls = authoritativeControls(appGate);
+  if (controls === null) {
+    const out = { available: false, authoritative: false, degraded: true };
+    if (typeof appGate.enabled === "boolean") out.enabled = appGate.enabled;
+    if (Array.isArray(appGate.effective_locks)) out.diagnostic_effective_locks = diagnosticControls(appGate.effective_locks);
+    if (Array.isArray(appGate.effective_allows)) out.diagnostic_effective_allows = diagnosticControls(appGate.effective_allows);
+    return out;
+  }
   const allows = controls.filter((control) => control.decision === "ALLOW");
   const locks = controls.filter((control) => control.decision === "LOCK");
   const out = {
+    available: true,
+    authoritative: true,
     effective_controls: controls,
     effective_locks: locks,
     effective_allows: allows,
     effective_lock_count: locks.length,
     effective_allow_count: allows.length
   };
-  if (typeof appGate?.enabled === "boolean") out.enabled = appGate.enabled;
+  if (typeof appGate.enabled === "boolean") out.enabled = appGate.enabled;
   return out;
 }
 
 function composeFocus(raw) {
-  const focus = isObject(raw) ? raw : {};
-  const out = { active: Boolean(focus.active) };
-  if (typeof focus.enabled === "boolean") out.enabled = focus.enabled;
+  if (!isObject(raw) || typeof raw.active !== "boolean") {
+    return { available: false, ...(isObject(raw) ? { degraded: true } : {}) };
+  }
+  const out = { available: true, active: raw.active };
+  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
   for (const key of [
     "goal", "reason", "scope", "managed_by_ai", "started_at_ms", "started_at_local",
     "until_ms", "until_local", "remaining_ms", "temporary_active", "temporary_until_ms",
     "temporary_remaining_ms", "emergency_remaining"
   ]) {
-    if (Object.prototype.hasOwnProperty.call(focus, key)) put(out, key, focus[key]);
+    if (Object.prototype.hasOwnProperty.call(raw, key)) put(out, key, raw[key]);
   }
   return out;
 }
@@ -218,8 +239,9 @@ function composeUsage(state) {
 
 function composeAttention({ appGate, todo, focus, freshness }) {
   const items = [];
-  if (todo.overdue_count > 0) items.push({ type: "todo_overdue", count: todo.overdue_count });
-  for (const allow of appGate.effective_allows) {
+  if (todo.available && todo.overdue_count > 0) items.push({ type: "todo_overdue", count: todo.overdue_count });
+  const effectiveAllows = appGate.available ? appGate.effective_allows : [];
+  for (const allow of effectiveAllows) {
     const remaining = numberOrNull(allow.remaining_ms);
     const expiresAt = positiveNumberOrNull(allow.expires_at_ms);
     const item = { type: "temporary_allow_active", package: allow.package };
@@ -227,12 +249,16 @@ function composeAttention({ appGate, todo, focus, freshness }) {
     else if (expiresAt !== null) item.expires_at_ms = expiresAt;
     items.push(item);
   }
-  if (focus.active) {
+  if (focus.available && focus.active) {
     const item = { type: "focus_active" };
     if (typeof focus.temporary_active === "boolean") item.temporary_release_active = focus.temporary_active;
     items.push(item);
   }
-  if (freshness.stale) items.push({ type: "state_stale", age_ms: freshness.age_ms, stale_after_ms: freshness.stale_after_ms });
+  if (freshness.stale) {
+    const item = { type: "state_stale", age_ms: freshness.age_ms, stale_after_ms: freshness.stale_after_ms };
+    if (freshness.clock_skew) item.clock_skew = true;
+    items.push(item);
+  }
   return items;
 }
 
@@ -250,7 +276,10 @@ export function composeCurrentContext(lifeState, options = {}) {
   const todo = composeTodo(state.todo_state, String(state.local_date || ""), nowMs);
   const focus = composeFocus(state.focus_mode);
   const usage = composeUsage(state);
+  const snapshotPartial = Boolean(state.error) || !appGate.available || !todo.available || !focus.available;
   const attentionItems = composeAttention({ appGate, todo, focus, freshness });
+  const snapshotFreshness = { ...freshness, partial: snapshotPartial, degraded: snapshotPartial };
+  if (state.error) snapshotFreshness.error = String(state.error);
 
   return {
     schema_version: CURRENT_CONTEXT_SCHEMA_VERSION,
@@ -262,12 +291,12 @@ export function composeCurrentContext(lifeState, options = {}) {
     usage,
     attention_items: attentionItems,
     freshness: {
-      snapshot: freshness,
+      snapshot: snapshotFreshness,
       device: { ...freshness },
-      app_gate: { ...freshness },
-      todo: { ...freshness, ...(todo.state_updated_at_ms ? { data_updated_at_ms: todo.state_updated_at_ms } : {}) },
-      focus: { ...freshness },
-      usage: { ...freshness }
+      app_gate: { ...freshness, available: appGate.available },
+      todo: { ...freshness, available: todo.available, ...(todo.state_updated_at_ms ? { data_updated_at_ms: todo.state_updated_at_ms } : {}) },
+      focus: { ...freshness, available: focus.available },
+      usage: { ...freshness, available: usage.available }
     }
   };
 }

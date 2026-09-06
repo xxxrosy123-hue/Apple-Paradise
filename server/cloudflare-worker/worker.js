@@ -266,7 +266,7 @@ const MCP_TOOLS = [
   { name: "linjian_status", description: "检查掌心窗 Cloudflare 后端是否在线、MCP 是否可用。", inputSchema: obj({}) },
   { name: "get_phone_state", description: "读取手机最近上报状态。适合查岗、看当前 App、电量、屏幕信息、无障碍状态。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
   { name: "get_life_state", description: "读取掌心窗生活状态层：电量、当前 App、屏幕时间、网络、天气等最近状态。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
-  { name: "get_current_context", description: "调用本工具获取苹果乐园当前共享事实，再据此由 AI 做判断。返回的是事实快照，不代表苹果乐园已经替 AI 做出‘该提醒、允许、拒绝或批评’的主观决定。只读工具；不会修改 Todo、AppGate、Focus，也不会自动放行。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE), wait_seconds: int(5) }) },
+  { name: "get_current_context", description: "调用本工具获取苹果乐园当前共享事实，再据此由 AI 做判断。返回的是事实快照，不代表苹果乐园已经替 AI 做出‘该提醒、允许、拒绝或批评’的主观决定。本工具不会执行用户任务、修改 Todo、主动改变 AppGate/Focus 决策或自动放行；底层模块可能在读取时清理已经按既定 TTL 自然过期的状态。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE), wait_seconds: int(5) }) },
   { name: "get_zhizhi_now", description: "读取『此刻用户』总状态：姿势、环境光、当前 App、电量、网络、通知/媒体等手机最近上报内容。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
   { name: "get_guardian_calendar", description: "读取守护日历/纪念日状态。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
   { name: "get_todos", description: "读取苹果乐园 Android 本地持久化的 Todo 正式事实。Todo 为所有聊天窗口共享；filter 支持 all/open/completed/overdue/due_today，due_today 仅表示 deadline 日期是今天。", inputSchema: obj({ filter: { type: "string", enum: ["all", "open", "completed", "overdue", "due_today"], default: "all" }, id: str(undefined), category: str(undefined), status: { type: "string", enum: ["open", "completed"] }, device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }) },

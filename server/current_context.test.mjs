@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { composeCurrentContext, CURRENT_CONTEXT_SCHEMA_VERSION, CURRENT_CONTEXT_STALE_AFTER_MS, CURRENT_CONTEXT_TODO_LIST_LIMIT } from "./current_context.mjs";
+import { composeCurrentContext, CURRENT_CONTEXT_SCHEMA_VERSION, CURRENT_CONTEXT_STALE_AFTER_MS, CURRENT_CONTEXT_FUTURE_SKEW_TOLERANCE_MS, CURRENT_CONTEXT_TODO_LIST_LIMIT } from "./current_context.mjs";
 
 const NOW = 1_800_000_000_000;
 const TODAY = "2027-01-15";
@@ -117,6 +117,93 @@ test("attention_items are objective structured facts", () => {
 test("schema_version stable and parseable", () => {
   const c = composeCurrentContext(baseState(), { nowMs: NOW });
   assert.equal(c.schema_version, CURRENT_CONTEXT_SCHEMA_VERSION); assert.equal(JSON.parse(JSON.stringify(c)).schema_version, 1);
+});
+
+
+test("missing Todo is unavailable, not empty", () => {
+  const s = baseState(); delete s.todo_state;
+  const t = composeCurrentContext(s, { nowMs: NOW }).todo;
+  assert.equal(t.available, false);
+  assert.equal(Object.prototype.hasOwnProperty.call(t, "open_count"), false);
+});
+
+test("missing AppGate is unavailable, not authoritative empty", () => {
+  const s = baseState(); delete s.app_gate;
+  const g = composeCurrentContext(s, { nowMs: NOW }).app_gate;
+  assert.equal(g.available, false); assert.equal(g.authoritative, false);
+  assert.equal(Object.prototype.hasOwnProperty.call(g, "effective_controls"), false);
+});
+
+test("missing Focus is unavailable, not inactive", () => {
+  const s = baseState(); delete s.focus_mode;
+  const f = composeCurrentContext(s, { nowMs: NOW }).focus;
+  assert.equal(f.available, false);
+  assert.equal(Object.prototype.hasOwnProperty.call(f, "active"), false);
+});
+
+test("partial LifeState marks snapshot degraded and preserves successful modules", () => {
+  const s = baseState(); s.error = "wallet_collect_failed"; delete s.focus_mode;
+  const c = composeCurrentContext(s, { nowMs: NOW });
+  assert.equal(c.freshness.snapshot.partial, true);
+  assert.equal(c.freshness.snapshot.degraded, true);
+  assert.equal(c.freshness.snapshot.error, "wallet_collect_failed");
+  assert.equal(c.freshness.snapshot.stale, false);
+  assert.equal(c.todo.available, true); assert.equal(c.app_gate.available, true);
+  assert.equal(c.focus.available, false);
+  assert.equal(Object.prototype.hasOwnProperty.call(c.focus, "active"), false);
+});
+
+test("future timestamp with material clock skew is stale", () => {
+  const s = baseState(); s.updated_at_ms = NOW + 60 * 60 * 1000;
+  const f = composeCurrentContext(s, { nowMs: NOW }).freshness.snapshot;
+  assert.equal(f.stale, true); assert.equal(f.age_ms, null); assert.equal(f.clock_skew, true);
+  assert.equal(f.future_by_ms, 60 * 60 * 1000);
+});
+
+test("small future timestamp tolerance does not create clock-skew failure", () => {
+  const s = baseState(); s.updated_at_ms = NOW + CURRENT_CONTEXT_FUTURE_SKEW_TOLERANCE_MS;
+  const f = composeCurrentContext(s, { nowMs: NOW }).freshness.snapshot;
+  assert.equal(f.stale, false); assert.equal(f.age_ms, 0); assert.equal(f.clock_skew, false);
+});
+
+test("legacy AppGate arrays are diagnostic only and never re-arbitrated", () => {
+  const s = baseState();
+  s.app_gate = { enabled: true,
+    effective_locks: [{ decision: "LOCK", package: "com.x", app_name: "X" }],
+    effective_allows: [{ decision: "ALLOW", package: "com.x", app_name: "X", remaining_ms: 5000 }] };
+  const c = composeCurrentContext(s, { nowMs: NOW });
+  const g = c.app_gate;
+  assert.equal(g.available, false); assert.equal(g.authoritative, false); assert.equal(g.degraded, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(g, "effective_controls"), false);
+  assert.equal(g.diagnostic_effective_locks.length, 1); assert.equal(g.diagnostic_effective_allows.length, 1);
+  assert.equal(c.attention_items.some(x => x.type === "temporary_allow_active"), false);
+});
+
+test("Todo bounded lists stay within limit", () => {
+  const s = baseState();
+  s.todo_state.todos = Array.from({ length: 20 }, (_, i) => todo(`late-${i}`, "open", { deadline: NOW - 1000 - i, dueToday: true, overdue: true }));
+  const t = composeCurrentContext(s, { nowMs: NOW }).todo;
+  assert.ok(t.overdue_todos.length <= CURRENT_CONTEXT_TODO_LIST_LIMIT);
+  assert.ok(t.open_due_today.length <= CURRENT_CONTEXT_TODO_LIST_LIMIT);
+});
+
+test("fresh snapshot has no state_stale attention", () => {
+  const c = composeCurrentContext(baseState(), { nowMs: NOW });
+  assert.equal(c.freshness.snapshot.stale, false);
+  assert.equal(c.attention_items.some(x => x.type === "state_stale"), false);
+});
+
+test("temporary allow attention never exposes negative expires_in_ms", () => {
+  const s = baseState();
+  s.app_gate.effective_controls = [{ decision: "ALLOW", package: "com.x", remaining_ms: -500, expires_at_ms: NOW + 5000 }];
+  const item = composeCurrentContext(s, { nowMs: NOW }).attention_items.find(x => x.type === "temporary_allow_active");
+  assert.ok(item); assert.ok(item.expires_in_ms >= 0);
+});
+
+test("missing updated_at is stale", () => {
+  const s = baseState(); delete s.updated_at_ms;
+  const f = composeCurrentContext(s, { nowMs: NOW }).freshness.snapshot;
+  assert.equal(f.stale, true); assert.equal(f.age_ms, null); assert.equal(f.clock_skew, false);
 });
 
 console.log("CurrentContextBehaviorTest: ALL PASS");
