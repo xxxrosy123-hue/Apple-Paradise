@@ -5,6 +5,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import fs from "fs";
 import path from "path";
+import { composeCurrentContext } from "../server/current_context.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const RAW_LINJIAN_URL = (process.env.LINJIAN_URL || "").trim();
@@ -821,6 +822,47 @@ function parsePhoneResult(command) {
   try { return JSON.parse(command.result); } catch { return command.result; }
 }
 
+async function getCurrentContextSnapshot(device_id = DEFAULT_DEVICE, wait_seconds = 5) {
+  let fresh_error = "";
+  let fresh_command_status = "not_started";
+  try {
+    const queued = await postCommand({ action: "get_life_state", device_id, payload: { action: "get_life_state" } });
+    const id = queued?.command?.id;
+    const observed = id ? await waitCommand(id, Math.max(3, Math.min(10, Number(wait_seconds || 5)))) : null;
+    const command = observed?.command || queued?.command || null;
+    fresh_command_status = String(command?.status || (id ? "pending" : "queue_failed"));
+    if (command?.status === "completed") {
+      const phoneState = parsePhoneResult(command);
+      if (phoneState && typeof phoneState === "object" && !Array.isArray(phoneState)) {
+        return {
+          ok: true,
+          ...composeCurrentContext(phoneState, { source: "android_fresh_command", transport: "direct_command" }),
+          retrieval: { fresh_command_status: "completed", fallback_used: false }
+        };
+      }
+      fresh_error = "fresh_life_state_invalid";
+    }
+  } catch (error) {
+    fresh_error = String(error?.message || error);
+  }
+
+  try {
+    const res = await linjianFetch(`/api/device/state?device_id=${encodeURIComponent(device_id)}`, { timeout_ms: QUICK_FETCH_TIMEOUT_MS });
+    const data = await res.json();
+    const cachedState = data?.state || data?.life_state || null;
+    if (!cachedState || typeof cachedState !== "object") {
+      return { ok: false, error: "current_context_unavailable", fresh_command_status, fresh_error: fresh_error || undefined };
+    }
+    return {
+      ok: true,
+      ...composeCurrentContext(cachedState, { source: "android_state_upload", transport: "server_cache" }),
+      retrieval: { fresh_command_status, fallback_used: true, fresh_error: fresh_error || undefined }
+    };
+  } catch (error) {
+    return { ok: false, error: "current_context_unavailable", fresh_command_status, fresh_error: fresh_error || undefined, cache_error: String(error?.message || error) };
+  }
+}
+
 async function runWalletCommand(action, args = {}, waitSeconds = DEFAULT_COMMAND_WAIT_SECONDS) {
   const device_id = args.device_id || DEFAULT_DEVICE;
   const payload = { action, ...args, device_id };
@@ -1012,7 +1054,7 @@ function makeServer() {
     "temporary_screen_break_release", "end_screen_break", "extend_screen_break", "deny_screen_break_release_request",
     "get_screen_break_state", "get_lock_state", "lock_app", "unlock_app", "temporary_unlock_app", "extend_lock", "deny_unlock_request",
     "list_screen_break_apps", "list_lockable_apps", "add_screen_break_app", "add_locked_app", "remove_locked_app", "set_screen_break_passphrase", "set_emergency_passphrase",
-    "todo_action", "get_todos",
+    "get_current_context", "todo_action", "get_todos",
     "get_focus_status", "start_focus_mode", "end_focus_mode", "set_focus_plan", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock", "request_focus_unlock", "create_focus_request",
     "get_wallet_month_state", "add_wallet_record", "list_wallet_pending", "submit_wallet_approval", "submit_companion_wallet_request", "list_companion_wallet_requests", "list_wallet_request_results", "confirm_wallet_record",
     "decide_wallet_approval", "save_wallet_request_result", "update_wallet_request_result", "save_user_wallet_request_result", "edit_wallet_record", "delete_wallet_record", "set_wallet_rules", "wallet_approval_request", "get_takeout_state", "set_takeout_budget", "set_takeout_preferences", "add_takeout_card", "save_takeout_card", "update_takeout_card", "remove_takeout_card", "delete_takeout_card", "list_takeout_cards", "list_takeout_meals", "remember_takeout_meal", "remember_current_takeout_meal", "suggest_takeout_options", "create_takeout_plan", "takeout_wallet_request", "open_takeout_link", "open_takeout_plan", "copy_takeout_note", "record_takeout_order", "prepare_takeout_checkout", "auto_takeout_checkout", "get_takeout_checkout_status", "cancel_takeout_checkout"
@@ -1038,6 +1080,10 @@ function makeServer() {
     return originalTool(...args);
   };
 
+
+  server.tool("get_current_context", "调用本工具获取苹果乐园当前共享事实，再据此由 AI 做判断。返回的是事实快照，不代表苹果乐园已经替 AI 做出‘该提醒、允许、拒绝或批评’的主观决定。只读工具；不会修改 Todo、AppGate、Focus，也不会自动放行。", { device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(10).default(5) }, async ({ device_id = DEFAULT_DEVICE, wait_seconds = 5 }) => {
+  return textResult(await getCurrentContextSnapshot(device_id, wait_seconds));
+});
 
   async function runTodoCommand(action, args = {}, waitSeconds = DEFAULT_COMMAND_WAIT_SECONDS) {
     const device_id = args.device_id || DEFAULT_DEVICE;

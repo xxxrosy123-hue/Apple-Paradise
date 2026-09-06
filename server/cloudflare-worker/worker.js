@@ -1,3 +1,5 @@
+import { composeCurrentContext } from "../current_context.mjs";
+
 const VERSION = "0.3.8.4-public-focus";
 // MCP Apps clients cache UI resources by URI. Change the URI whenever the HTML changes.
 const STICKER_WIDGET_URI = "ui://linjian/sticker-card-v0433.html";
@@ -14,7 +16,7 @@ const KNOWN_APPS = {
 const ALLOWED_ACTIONS = new Set([
   "noop", "peek", "play_audio", "play_lingyin", "play_jingming", "open_app", "home", "back", "recents",
   "screen_off", "turn_screen_off", "lock_screen", "phone_screen_off", "tap", "swipe", "set_alarm", "send_notification",
-  "run_sequence", "save_known_app", "get_screen_nodes", "tap_text", "input_text", "lock_app", "unlock_app",
+  "run_sequence", "save_known_app", "get_life_state", "get_screen_nodes", "tap_text", "input_text", "lock_app", "unlock_app",
   "temporary_unlock_app", "extend_lock", "deny_unlock_request", "get_zhizhi_now", "get_lock_state", "set_emergency_passphrase",
   "add_locked_app", "remove_locked_app", "list_lockable_apps", "screen_break_app", "start_screen_break", "screen_break",
   "end_screen_break", "stop_screen_break", "temporary_screen_break_release", "temporary_screen_release", "extend_screen_break",
@@ -264,6 +266,7 @@ const MCP_TOOLS = [
   { name: "linjian_status", description: "检查掌心窗 Cloudflare 后端是否在线、MCP 是否可用。", inputSchema: obj({}) },
   { name: "get_phone_state", description: "读取手机最近上报状态。适合查岗、看当前 App、电量、屏幕信息、无障碍状态。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
   { name: "get_life_state", description: "读取掌心窗生活状态层：电量、当前 App、屏幕时间、网络、天气等最近状态。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
+  { name: "get_current_context", description: "调用本工具获取苹果乐园当前共享事实，再据此由 AI 做判断。返回的是事实快照，不代表苹果乐园已经替 AI 做出‘该提醒、允许、拒绝或批评’的主观决定。只读工具；不会修改 Todo、AppGate、Focus，也不会自动放行。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE), wait_seconds: int(5) }) },
   { name: "get_zhizhi_now", description: "读取『此刻用户』总状态：姿势、环境光、当前 App、电量、网络、通知/媒体等手机最近上报内容。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
   { name: "get_guardian_calendar", description: "读取守护日历/纪念日状态。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
   { name: "get_todos", description: "读取苹果乐园 Android 本地持久化的 Todo 正式事实。Todo 为所有聊天窗口共享；filter 支持 all/open/completed/overdue/due_today，due_today 仅表示 deadline 日期是今天。", inputSchema: obj({ filter: { type: "string", enum: ["all", "open", "completed", "overdue", "due_today"], default: "all" }, id: str(undefined), category: str(undefined), status: { type: "string", enum: ["open", "completed"] }, device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }) },
@@ -653,6 +656,31 @@ async function callMcpTool(name, args = {}, env) {
     case "linjian_status": return mcpText({ ok: true, service: "linjian-cloudflare-mcp", version: VERSION, has_db: Boolean(env.DB), has_kv: Boolean(env.SCREENSHOT_KV), has_token: Boolean(env.LINJIAN_TOKEN), endpoint: "/mcp", tools: MCP_TOOLS.map(t => t.name), cloudflare_full_tools: true, excluded_audio_tools: ["get_recent_voice_tone", "create_lingyin", "get_recent_lingyin", "create_jingming", "get_recent_jingming"] });
     case "get_phone_state":
     case "get_life_state": return mcpText(await state());
+    case "get_current_context": {
+      let freshError = "";
+      let freshStatus = "not_started";
+      try {
+        const queued = await enqueue({ action: "get_life_state", payload: { action: "get_life_state" } });
+        const id = queued?.command?.id;
+        const obs = id ? await waitCommand(env, id, Math.max(3, Math.min(10, Number(args.wait_seconds ?? 5)))) : null;
+        const command = obs?.command || queued?.command || null;
+        freshStatus = String(command?.status || (id ? "pending" : "queue_failed"));
+        if (command?.status === "completed" && command.result) {
+          let phoneState = null;
+          try { phoneState = JSON.parse(command.result); } catch (_) { }
+          if (phoneState && typeof phoneState === "object" && !Array.isArray(phoneState)) {
+            return mcpText({ ok: true, ...composeCurrentContext(phoneState, { source: "android_fresh_command", transport: "direct_command" }), retrieval: { fresh_command_status: "completed", fallback_used: false } });
+          }
+          freshError = "fresh_life_state_invalid";
+        }
+      } catch (error) {
+        freshError = String(error?.message || error);
+      }
+      const cached = await state().catch((error) => ({ ok: false, error: String(error?.message || error) }));
+      const cachedState = cached?.state || cached?.life_state || null;
+      if (!cachedState || typeof cachedState !== "object") return mcpText({ ok: false, error: "current_context_unavailable", fresh_command_status: freshStatus, fresh_error: freshError || undefined, cache_error: cached?.error || undefined }, true);
+      return mcpText({ ok: true, ...composeCurrentContext(cachedState, { source: "android_state_upload", transport: "server_cache" }), retrieval: { fresh_command_status: freshStatus, fallback_used: true, fresh_error: freshError || undefined } });
+    }
     case "get_zhizhi_now": {
       const s = await state();
       return mcpText({ ok: true, device_id, zhizhi_now: s?.state?.zhizhi_now || s?.state?.now || s?.state || null, raw: s });
