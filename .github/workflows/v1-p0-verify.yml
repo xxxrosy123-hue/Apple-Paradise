@@ -1,0 +1,87 @@
+name: V1 P0 Verify
+
+on:
+  push:
+    branches:
+      - v1-dev
+    paths:
+      - '.github/workflows/v1-p0-verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout v1-dev
+        uses: actions/checkout@v4
+        with:
+          ref: v1-dev
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+
+      - name: JavaScript and Python syntax
+        run: |
+          node --check mcp/server.js
+          node --check server/cloudflare-worker/worker.js
+          python3 -m py_compile server/linjian_server.py
+
+      - name: Pure Java AppGate TTL regression
+        run: |
+          rm -rf /tmp/appgate-p0-test
+          mkdir -p /tmp/appgate-p0-test
+          javac -source 11 -target 11 -d /tmp/appgate-p0-test \
+            android/app/src/main/java/dev/linjian/peek/AppGateDecisionRules.java \
+            android/tests/AppGateDecisionRulesTest.java
+          java -cp /tmp/appgate-p0-test dev.linjian.peek.AppGateDecisionRulesTest
+
+      - name: Verify P0 cross-window source contracts
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          app = Path('android/app/src/main/java/dev/linjian/peek/AppGate.java').read_text(encoding='utf-8')
+          node = Path('mcp/server.js').read_text(encoding='utf-8')
+          worker = Path('server/cloudflare-worker/worker.js').read_text(encoding='utf-8')
+          required_app = [
+              'conflict_active_permission',
+              'revoke_temporary_allow',
+              'temporary_decision_id',
+              'temporary_reason',
+              'temporary_source',
+              'temporary_approved_by',
+              'temporary_expires_at_ms',
+              'effective_allows',
+              'effective_controls',
+              'clearTemp(l);',
+          ]
+          for token in required_app:
+              assert token in app, f'missing Android contract: {token}'
+          guard = '不得仅因用户提出请求就无脑批准临时放行'
+          continuity = '换聊天窗口不代表原有管理原则失效'
+          for name, text in [('node', node), ('worker', worker)]:
+              assert guard in text, f'missing non-blind-approval precondition in {name}'
+              assert continuity in text, f'missing cross-window precondition in {name}'
+              assert 'revoke_temporary_allow' in text, f'missing explicit revoke in {name}'
+              assert 'approved_by' in text, f'missing approver metadata in {name}'
+          print('P0 source contracts: PASS')
+          PY
+
+      - name: Build Android debug APK
+        run: bash android/build.sh
+
+      - name: Verify APK exists
+        run: ls -lh android/*.apk
+
+      - name: Repository diff check
+        run: git diff --check
