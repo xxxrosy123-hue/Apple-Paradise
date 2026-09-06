@@ -44,6 +44,14 @@ public final class TodoState {
         return "todo_action".equals(action) || "get_todos".equals(action);
     }
 
+    /** Read-only stable-id lookup used by Focus binding validation. Never reopens or mutates a Todo. */
+    static synchronized JSONObject findByIdForFocus(Context ctx, String id) {
+        String wanted = clean(id);
+        if (wanted.isEmpty()) return null;
+        TodoStateCore.Todo todo = load(ctx).get(wanted);
+        return todo == null ? null : todoJson(todo, System.currentTimeMillis());
+    }
+
     public static synchronized JSONObject handleCommand(Context ctx, JSONObject cmd) {
         JSONObject out = new JSONObject();
         String action = cmd == null ? "" : cmd.optString("action", "");

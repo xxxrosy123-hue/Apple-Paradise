@@ -214,7 +214,7 @@ function composeFocus(raw) {
   const out = { available: true, active: raw.active };
   if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
   for (const key of [
-    "goal", "reason", "scope", "managed_by_ai", "started_at_ms", "started_at_local",
+    "goal", "reason", "scope", "managed_by_ai", "session_id", "todo_id", "category", "started_at_ms", "started_at_local",
     "until_ms", "until_local", "remaining_ms", "temporary_active", "temporary_until_ms",
     "temporary_remaining_ms", "emergency_remaining"
   ]) {

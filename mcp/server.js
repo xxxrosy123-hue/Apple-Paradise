@@ -1055,7 +1055,7 @@ function makeServer() {
     "get_screen_break_state", "get_lock_state", "lock_app", "unlock_app", "temporary_unlock_app", "extend_lock", "deny_unlock_request",
     "list_screen_break_apps", "list_lockable_apps", "add_screen_break_app", "add_locked_app", "remove_locked_app", "set_screen_break_passphrase", "set_emergency_passphrase",
     "get_current_context", "todo_action", "get_todos",
-    "get_focus_status", "start_focus_mode", "end_focus_mode", "set_focus_plan", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock", "request_focus_unlock", "create_focus_request",
+    "get_focus_status", "get_focus_sessions", "start_focus_mode", "end_focus_mode", "set_focus_plan", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock", "request_focus_unlock", "create_focus_request",
     "get_wallet_month_state", "add_wallet_record", "list_wallet_pending", "submit_wallet_approval", "submit_companion_wallet_request", "list_companion_wallet_requests", "list_wallet_request_results", "confirm_wallet_record",
     "decide_wallet_approval", "save_wallet_request_result", "update_wallet_request_result", "save_user_wallet_request_result", "edit_wallet_record", "delete_wallet_record", "set_wallet_rules", "wallet_approval_request", "get_takeout_state", "set_takeout_budget", "set_takeout_preferences", "add_takeout_card", "save_takeout_card", "update_takeout_card", "remove_takeout_card", "delete_takeout_card", "list_takeout_cards", "list_takeout_meals", "remember_takeout_meal", "remember_current_takeout_meal", "suggest_takeout_options", "create_takeout_plan", "takeout_wallet_request", "open_takeout_link", "open_takeout_plan", "copy_takeout_note", "record_takeout_order", "prepare_takeout_checkout", "auto_takeout_checkout", "get_takeout_checkout_status", "cancel_takeout_checkout"
   ]);
@@ -1129,9 +1129,25 @@ function makeServer() {
 
 
   // v0.3.8.2：专注模式工具靠前注册，避免部分客户端只读取前若干个 schema 时漏掉接口。
-  server.tool("get_focus_status", "读取手机端专注模式 Focus Mode 状态：是否开启、目标、剩余时间、留言、应急次数。用户问专注模式、锁手机、全机专注、留言给他时优先调用。", {
-    device_id: z.string().default(DEFAULT_DEVICE)
-  }, async ({ device_id = DEFAULT_DEVICE }) => {
+  server.tool("get_focus_status", "读取当前 Focus；可传正式 todo_id 查询该 Todo 的累计实际 Focus session。Focus 记录实际投入，不代表 Todo 已完成；同一 Todo 可对应多次 Focus，任何时长都不得据此自动 complete Todo。", {
+    todo_id: z.string().max(160).default(""),
+    limit: z.number().int().min(1).max(20).default(8),
+    device_id: z.string().default(DEFAULT_DEVICE),
+    wait_seconds: z.number().int().min(3).max(20).default(8)
+  }, async ({ todo_id = "", limit = 8, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    if (String(todo_id || "").trim()) {
+      const payload = { todo_id: String(todo_id).trim(), limit };
+      const queued = await postCommand({ action: "get_focus_sessions", device_id, payload, ...payload });
+      const id = queued?.command?.id;
+      const observed = id ? await waitCommand(id, wait_seconds) : null;
+      let summary = null;
+      const raw = observed?.command?.result;
+      if (typeof raw === "string") { try { summary = JSON.parse(raw); } catch {} }
+      else if (raw && typeof raw === "object") summary = raw;
+      await postCompanionAction("get_focus_status");
+      return textResult({ ok: observed?.command?.status === "completed", device_id, todo_id: payload.todo_id, focus_summary: summary,
+        note: "focus_summary is derived from completed Android-local Focus sessions; it does not imply Todo completion." });
+    }
     const res = await linjianFetch(`/api/life_state?device_id=${encodeURIComponent(device_id)}`);
     const data = await res.json();
     const state = data?.life_state || data?.state || {};
@@ -1139,18 +1155,20 @@ function makeServer() {
     return textResult({ ok: true, device_id, focus_mode: state?.focus_mode || {}, life_state_version: state?.life_state_version || "" });
   });
 
-  server.tool("start_focus_mode", "开启全机专注模式。用户说“帮我专注/锁手机/别让我玩手机/睡前管我/开专注模式/专注几分钟”时优先调用本工具，不要改用应用门禁。默认全机专注，手机解锁后也会回到专注页；页面支持“留言给他”和一次短暂应急放行。", {
+  server.tool("start_focus_mode", "开启全机专注模式；可用 todo_id 绑定一个 Android 本地正式 open Todo，category 是本次 Focus 自己的自由分类。一个 Todo 可对应多次 Focus；Focus 只记录实际投入，不会自动 complete/reopen Todo。普通不绑定 Todo 的 Focus 仍然合法。", {
     duration_minutes: z.number().positive().max(1440).default(30),
     target: z.string().max(120).default("先离开手机，专注完成当前任务"),
     guard_message: z.string().max(240).default("这段时间先交给我，我会帮你守住。"),
     emergency_total: z.number().int().min(0).max(5).default(1),
     emergency_minutes: z.number().int().min(1).max(30).default(1),
+    todo_id: z.string().max(160).default(""),
+    category: z.string().max(80).default(""),
     managed_by_ai: z.boolean().default(true),
     screen_off: z.boolean().default(false),
     device_id: z.string().default(DEFAULT_DEVICE),
     wait_seconds: z.number().int().min(3).max(20).default(8)
-  }, async ({ duration_minutes = 30, target = "先离开手机，专注完成当前任务", guard_message = "这段时间先交给我，我会帮你守住。", emergency_total = 1, emergency_minutes = 1, managed_by_ai = true, screen_off = false, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
-    const payload = { duration_minutes, target, goal: target, guard_message, message: guard_message, emergency_total, emergency_minutes, managed_by_ai, scope: "full_phone", screen_off };
+  }, async ({ duration_minutes = 30, target = "先离开手机，专注完成当前任务", guard_message = "这段时间先交给我，我会帮你守住。", emergency_total = 1, emergency_minutes = 1, todo_id = "", category = "", managed_by_ai = true, screen_off = false, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const payload = { duration_minutes, target, goal: target, guard_message, message: guard_message, emergency_total, emergency_minutes, todo_id: String(todo_id || "").trim(), category: String(category || "").trim(), managed_by_ai, scope: "full_phone", screen_off };
     const queued = await postCommand({ action: "start_focus_mode", device_id, payload, ...payload });
     const id = queued?.command?.id;
     const observed = id ? await waitCommand(id, wait_seconds) : null;

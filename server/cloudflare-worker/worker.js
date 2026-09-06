@@ -21,7 +21,7 @@ const ALLOWED_ACTIONS = new Set([
   "add_locked_app", "remove_locked_app", "list_lockable_apps", "screen_break_app", "start_screen_break", "screen_break",
   "end_screen_break", "stop_screen_break", "temporary_screen_break_release", "temporary_screen_release", "extend_screen_break",
   "deny_screen_break_release_request", "deny_break_release_request", "get_screen_break_state", "set_screen_break_passphrase",
-  "add_screen_break_app", "remove_screen_break_app", "list_screen_break_apps", "get_focus_status", "start_focus_mode", "end_focus_mode", "set_focus_plan", "request_focus_unlock", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock", "temporary_focus_unlock", "get_guidian_state", "set_guidian_config",
+  "add_screen_break_app", "remove_screen_break_app", "list_screen_break_apps", "get_focus_status", "get_focus_sessions", "start_focus_mode", "end_focus_mode", "set_focus_plan", "request_focus_unlock", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock", "temporary_focus_unlock", "get_guidian_state", "set_guidian_config",
   "trigger_guidian", "mark_guidian_returned", "get_calendar_state", "upsert_calendar_event", "add_calendar_event", "delete_calendar_event", "todo_action", "get_todos",
   "get_wallet_state", "get_wallet_month_state", "list_wallet_months", "add_wallet_record", "list_wallet_pending", "list_wallet_approvals", "submit_wallet_approval", "confirm_wallet_record", "decide_wallet_approval", "save_wallet_request_result", "update_wallet_request_result", "get_wallet_rules", "set_wallet_rules", "wallet_approval_request", "get_takeout_state", "list_takeout_cards", "list_takeout_meals", "remember_takeout_meal", "remember_current_takeout_meal", "set_takeout_budget", "set_takeout_preferences", "add_takeout_card", "save_takeout_card", "update_takeout_card", "remove_takeout_card", "delete_takeout_card", "suggest_takeout_options", "create_takeout_plan", "takeout_wallet_request", "open_takeout_link", "copy_takeout_note", "record_takeout_order", "prepare_takeout_checkout", "auto_takeout_checkout", "get_takeout_checkout_status", "cancel_takeout_checkout"
 ]);
@@ -321,8 +321,8 @@ const MCP_TOOLS = [
   { name: "get_screen_break_release_requests", description: "查看手机端提交的恢复申请。", inputSchema: obj({}) },
 
 
-  { name: "get_focus_status", description: "读取掌心窗专注模式状态：是否正在全屏锁定、剩余时间、应急次数、留言给他小窗消息和最近求助。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
-  { name: "start_focus_mode", description: "开启全机专注：解锁后也会回到全屏锁定页，只留留言给他和应急放行；锁单个 App 请使用应用门禁。", inputSchema: obj({ duration_minutes: num(30), goal: str("早点休息"), target: str(""), mode: str("strict"), scope: str("full_phone"), managed_by_ai: bool(true), message: str("你提前把这段时间交给我了，我会帮你守住。"), guard_message: str(""), emergency_total: int(1), emergency_minutes: int(5), screen_off: bool(false), device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }) },
+  { name: "get_focus_status", description: "读取当前 Focus；可传正式 todo_id 查询该 Todo 的累计实际 Focus session。Focus 记录实际投入，不代表 Todo 已完成；同一 Todo 可对应多次 Focus。", inputSchema: obj({ todo_id: str(""), limit: int(8), device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }) },
+  { name: "start_focus_mode", description: "开启全机专注；todo_id 可绑定 Android 本地正式 open Todo，category 是本次 Focus 自由分类。一个 Todo 可对应多次 Focus；Focus 不会自动 complete/reopen Todo。", inputSchema: obj({ duration_minutes: num(30), goal: str("早点休息"), target: str(""), todo_id: str(""), category: str(""), mode: str("strict"), scope: str("full_phone"), managed_by_ai: bool(true), message: str("你提前把这段时间交给我了，我会帮你守住。"), guard_message: str(""), emergency_total: int(1), emergency_minutes: int(5), screen_off: bool(false), device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }) },
   { name: "end_focus_mode", description: "结束掌心窗专注模式。只在用户明确要求结束或测试时使用；不要在半夜随便替用户解除。", inputSchema: obj({ reason: str("manual_end"), device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }) },
   { name: "set_focus_plan", description: "保存全机专注默认规则：目标、应急次数、每次应急分钟数和提醒文案；锁单个 App 请使用应用门禁。", inputSchema: obj({ enabled: bool(true), goal: str("早点休息"), target: str(""), mode: str("strict"), scope: str("full_phone"), managed_by_ai: bool(true), message: str("你提前把这段时间交给我了，我会帮你守住。"), guard_message: str(""), emergency_total: int(1), emergency_minutes: int(5), device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }) },
   { name: "reply_focus_request", description: "回复锁定页“留言给他”小窗里的用户求助，只留言不放行。", inputSchema: obj({ message: str("我在。先别急，把原因告诉我。"), device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }, ["message"]) },
@@ -777,7 +777,14 @@ async function callMcpTool(name, args = {}, env) {
     case "get_screen_break_release_requests": return mcpText(await responseJson(await listUnlockRequests(env)));
 
 
-    case "get_focus_status": { const s = await state(); return mcpText({ ok: true, device_id, focus_mode: s?.state?.focus_mode || {}, note: "若 focus_mode 为空，请先让手机端启动并上传一次状态。" }); }
+    case "get_focus_status": {
+      if (String(args.todo_id || "").trim()) {
+        const payload = { action: "get_focus_sessions", todo_id: String(args.todo_id).trim(), limit: Math.max(1, Math.min(20, Number(args.limit || 8))) };
+        return observed({ ...payload, payload }, args.wait_seconds ?? 8);
+      }
+      const s = await state();
+      return mcpText({ ok: true, device_id, focus_mode: s?.state?.focus_mode || {}, note: "若 focus_mode 为空，请先让手机端启动并上传一次状态。" });
+    }
     case "start_focus_mode": { const payload = withoutKeys(args, ["device_id", "wait_seconds"]); payload.action = "start_focus_mode"; return observed({ ...payload, payload }, args.wait_seconds ?? 8); }
     case "end_focus_mode": { const payload = withoutKeys(args, ["device_id", "wait_seconds"]); payload.action = "end_focus_mode"; return observed({ ...payload, payload }, args.wait_seconds ?? 8); }
     case "set_focus_plan": { const payload = withoutKeys(args, ["device_id", "wait_seconds"]); payload.action = "set_focus_plan"; return observed({ ...payload, payload }, args.wait_seconds ?? 8); }

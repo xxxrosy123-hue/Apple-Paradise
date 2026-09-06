@@ -206,4 +206,14 @@ test("missing updated_at is stale", () => {
   assert.equal(f.stale, true); assert.equal(f.age_ms, null); assert.equal(f.clock_skew, false);
 });
 
+test("active Focus exposes only current Todo-session linkage", () => {
+  const s = baseState();
+  s.focus_mode = { active: true, session_id: "focus_123", todo_id: "todo_abc", category: "考研",
+    scope: "full_phone", started_at_ms: NOW - 5000, until_ms: NOW + 60000, temporary_active: false };
+  const f = composeCurrentContext(s, { nowMs: NOW }).focus;
+  assert.equal(f.available, true); assert.equal(f.active, true);
+  assert.equal(f.session_id, "focus_123"); assert.equal(f.todo_id, "todo_abc"); assert.equal(f.category, "考研");
+  assert.equal(Object.prototype.hasOwnProperty.call(f, "sessions"), false);
+});
+
 console.log("CurrentContextBehaviorTest: ALL PASS");

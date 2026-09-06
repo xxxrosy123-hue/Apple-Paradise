@@ -209,7 +209,7 @@ public class CompanionService extends Service {
                 Context focusCtx = ScreenshotService.getInstance() != null ? ScreenshotService.getInstance() : ctx;
                 JSONObject rr = FocusMode.handleCommand(focusCtx, cmd);
                 boolean ok = rr.optBoolean("ok", false);
-                String result = rr.optString("result", rr.toString());
+                String result = "get_focus_sessions".equals(action) ? rr.toString() : rr.optString("result", rr.toString());
                 if (ok && ("start_focus_mode".equals(action) || "enable_focus_mode".equals(action))) {
                     FocusMode.forceShowLockActivity(focusCtx);
                 }
