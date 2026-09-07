@@ -134,6 +134,7 @@ public class MainActivity extends Activity {
         buildMagazinePages();
         loadSettings();
         NowState.start(this);
+        ScheduleReminder.reschedule(this);
 
         DebugState.append(this, "掌心窗公开版 v0.3.8.4 已打开");
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 13);
@@ -238,6 +239,14 @@ public class MainActivity extends Activity {
 
     private void buildMagazinePages() {
         View today = buildTodayMagazine();
+        // Phase 5: one independent timeline entry; no homepage redesign.
+        if (today instanceof LinearLayout) {
+            Button timeline = actionButton("时间轴  ·  查看计划与实际  ›", false);
+            timeline.setMinHeight(dp(48));
+            timeline.setContentDescription("打开时间轴，查看日周安排并记录实际时间");
+            timeline.setOnClickListener(v -> startActivity(new Intent(this, ScheduleActivity.class)));
+            ((LinearLayout) today).addView(timeline, 1, matchWrapTop(8));
+        }
         View companion = buildCompanionMagazine();
         View guard = buildGuardMagazine();
         replaceScrollContent(sectionLife, today);

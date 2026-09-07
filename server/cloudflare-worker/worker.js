@@ -1,4 +1,5 @@
 import { composeCurrentContext } from "../current_context.mjs";
+import { SCHEDULE_QUERY_DESCRIPTION, SCHEDULE_ACTION_DESCRIPTION, SCHEDULE_QUERY_SCHEMA, SCHEDULE_ACTION_SCHEMA, normalizeScheduleQuery, normalizeScheduleAction, scheduleCommandEnvelope, scheduleTransportResult } from "../schedule_contract.mjs";
 
 const VERSION = "0.3.8.4-public-focus";
 // MCP Apps clients cache UI resources by URI. Change the URI whenever the HTML changes.
@@ -22,7 +23,7 @@ const ALLOWED_ACTIONS = new Set([
   "end_screen_break", "stop_screen_break", "temporary_screen_break_release", "temporary_screen_release", "extend_screen_break",
   "deny_screen_break_release_request", "deny_break_release_request", "get_screen_break_state", "set_screen_break_passphrase",
   "add_screen_break_app", "remove_screen_break_app", "list_screen_break_apps", "get_focus_status", "get_focus_sessions", "start_focus_mode", "end_focus_mode", "set_focus_plan", "request_focus_unlock", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock", "temporary_focus_unlock", "get_guidian_state", "set_guidian_config",
-  "trigger_guidian", "mark_guidian_returned", "get_calendar_state", "upsert_calendar_event", "add_calendar_event", "delete_calendar_event", "todo_action", "get_todos",
+  "trigger_guidian", "mark_guidian_returned", "get_calendar_state", "upsert_calendar_event", "add_calendar_event", "delete_calendar_event", "todo_action", "get_todos", "schedule_action", "get_schedule",
   "get_wallet_state", "get_wallet_month_state", "list_wallet_months", "add_wallet_record", "list_wallet_pending", "list_wallet_approvals", "submit_wallet_approval", "confirm_wallet_record", "decide_wallet_approval", "save_wallet_request_result", "update_wallet_request_result", "get_wallet_rules", "set_wallet_rules", "wallet_approval_request", "get_takeout_state", "list_takeout_cards", "list_takeout_meals", "remember_takeout_meal", "remember_current_takeout_meal", "set_takeout_budget", "set_takeout_preferences", "add_takeout_card", "save_takeout_card", "update_takeout_card", "remove_takeout_card", "delete_takeout_card", "suggest_takeout_options", "create_takeout_plan", "takeout_wallet_request", "open_takeout_link", "copy_takeout_note", "record_takeout_order", "prepare_takeout_checkout", "auto_takeout_checkout", "get_takeout_checkout_status", "cancel_takeout_checkout"
 ]);
 
@@ -271,6 +272,8 @@ const MCP_TOOLS = [
   { name: "get_guardian_calendar", description: "读取守护日历/纪念日状态。", inputSchema: obj({ device_id: str(DEFAULT_DEVICE) }) },
   { name: "get_todos", description: "读取苹果乐园 Android 本地持久化的 Todo 正式事实。Todo 为所有聊天窗口共享；filter 支持 all/open/completed/overdue/due_today，due_today 仅表示 deadline 日期是今天。", inputSchema: obj({ filter: { type: "string", enum: ["all", "open", "completed", "overdue", "due_today"], default: "all" }, id: str(undefined), category: str(undefined), status: { type: "string", enum: ["open", "completed"] }, device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }) },
   { name: "todo_action", description: "创建、修改、完成、重新打开或删除 Todo 正式共享事实。写操作会改变所有聊天窗口之后读到的状态；不得仅因当前窗口主观猜测任务已完成就擅自 complete/delete，只有用户明确表达或可靠事实足以确认时才修改。", inputSchema: obj({ operation: { type: "string", enum: ["create", "update", "complete", "reopen", "delete"] }, id: str(undefined), title: str(undefined), note: str(undefined), category: str(undefined), priority: str(undefined), deadline_at_ms: num(undefined), deadline: str(undefined), clear_deadline: bool(false), device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }, ["operation"]) },
+  { name: "get_schedule", description: SCHEDULE_QUERY_DESCRIPTION, inputSchema: SCHEDULE_QUERY_SCHEMA },
+  { name: "schedule_action", description: SCHEDULE_ACTION_DESCRIPTION, inputSchema: SCHEDULE_ACTION_SCHEMA },
   { name: "add_guardian_calendar_event", description: "向手机下发添加或更新守护日历事项的指令。支持阳历/农历、重复、分组、提前提醒。", inputSchema: obj({ title: str(""), date: str(""), calendar: str("solar"), date_type: str(""), repeat: bool(true), repeat_type: str("yearly"), group: str("纪念日"), note: str(""), remind_days_before: num(3), banner_enabled: bool(true), device_id: str(DEFAULT_DEVICE), wait_seconds: int(8) }, ["title", "date"]) },
   { name: "get_window_whisper", description: "读取陪伴页共同窗语。", inputSchema: obj({}) },
   { name: "set_window_whisper", description: "更新陪伴页共同窗语。", inputSchema: obj({ content: str(""), author: str("陪伴对象") }, ["content"]) },
@@ -696,6 +699,17 @@ async function callMcpTool(name, args = {}, env) {
     case "todo_action": {
       const payload = withoutKeys(args, ["device_id", "wait_seconds"]);
       return observed({ action: "todo_action", ...payload, payload }, args.wait_seconds ?? 8);
+    }
+    case "get_schedule":
+    case "schedule_action": {
+      try {
+        const clean = name === "get_schedule" ? normalizeScheduleQuery(args) : normalizeScheduleAction(args);
+        const queued = await enqueue(scheduleCommandEnvelope(name, clean, device_id));
+        const id = queued?.command?.id;
+        const obs = id ? await waitCommand(env, id, args.wait_seconds ?? 8) : null;
+        const result = scheduleTransportResult(queued, obs);
+        return mcpText(result, !result.ok && obs?.command?.status === "failed");
+      } catch (error) { return mcpText({ok:false,error:String(error?.message||error)},true); }
     }
     case "get_guidian_state": return mcpText(await responseJson(await getNestedState(env, fakeUrl(`/api/guidian_state?${qs({ device_id })}`), "guidian_state")));
     case "get_window_whisper": return mcpText(await responseJson(await getCompanionState(env, fakeUrl("/api/companion/state?limit=1"))));

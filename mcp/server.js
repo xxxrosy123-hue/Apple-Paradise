@@ -6,6 +6,7 @@ import { z } from "zod";
 import fs from "fs";
 import path from "path";
 import { composeCurrentContext } from "../server/current_context.mjs";
+import { SCHEDULE_QUERY_DESCRIPTION, SCHEDULE_ACTION_DESCRIPTION, normalizeScheduleQuery, normalizeScheduleAction, scheduleCommandEnvelope, scheduleTransportResult } from "../server/schedule_contract.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const RAW_LINJIAN_URL = (process.env.LINJIAN_URL || "").trim();
@@ -1054,7 +1055,7 @@ function makeServer() {
     "temporary_screen_break_release", "end_screen_break", "extend_screen_break", "deny_screen_break_release_request",
     "get_screen_break_state", "get_lock_state", "lock_app", "unlock_app", "temporary_unlock_app", "extend_lock", "deny_unlock_request",
     "list_screen_break_apps", "list_lockable_apps", "add_screen_break_app", "add_locked_app", "remove_locked_app", "set_screen_break_passphrase", "set_emergency_passphrase",
-    "get_current_context", "todo_action", "get_todos",
+    "get_current_context", "todo_action", "get_todos", "get_schedule", "schedule_action",
     "get_focus_status", "get_focus_sessions", "start_focus_mode", "end_focus_mode", "set_focus_plan", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock", "request_focus_unlock", "create_focus_request",
     "get_wallet_month_state", "add_wallet_record", "list_wallet_pending", "submit_wallet_approval", "submit_companion_wallet_request", "list_companion_wallet_requests", "list_wallet_request_results", "confirm_wallet_record",
     "decide_wallet_approval", "save_wallet_request_result", "update_wallet_request_result", "save_user_wallet_request_result", "edit_wallet_record", "delete_wallet_record", "set_wallet_rules", "wallet_approval_request", "get_takeout_state", "set_takeout_budget", "set_takeout_preferences", "add_takeout_card", "save_takeout_card", "update_takeout_card", "remove_takeout_card", "delete_takeout_card", "list_takeout_cards", "list_takeout_meals", "remember_takeout_meal", "remember_current_takeout_meal", "suggest_takeout_options", "create_takeout_plan", "takeout_wallet_request", "open_takeout_link", "open_takeout_plan", "copy_takeout_note", "record_takeout_order", "prepare_takeout_checkout", "auto_takeout_checkout", "get_takeout_checkout_status", "cancel_takeout_checkout"
@@ -1127,6 +1128,45 @@ function makeServer() {
     wait_seconds: z.number().int().min(3).max(20).default(8)
   }, async (args) => textResult(await runTodoCommand("todo_action", args, args.wait_seconds)));
 
+
+  // Phase 5: shared Schedule contract. Domain block_id is not the transport command UUID.
+  async function runScheduleCommand(action, args = {}) {
+    try {
+      const clean = action === "get_schedule" ? normalizeScheduleQuery(args) : normalizeScheduleAction(args);
+      const envelope = scheduleCommandEnvelope(action, clean, args.device_id || DEFAULT_DEVICE);
+      const queued = await postCommand(envelope);
+      const id = queued?.command?.id;
+      const observed = id ? await waitCommand(id, args.wait_seconds || 8) : null;
+      return scheduleTransportResult(queued, observed);
+    } catch (error) { return { ok: false, error: String(error?.message || error) }; }
+  }
+  const scheduleRepeatZod = z.object({
+    frequency: z.enum(["none", "daily", "weekly"]),
+    timezone: z.string().optional(), anchor_date: z.string().optional(),
+    start_time: z.string().optional(), end_time: z.string().optional(),
+    end_day_offset: z.number().int().min(0).max(366).optional(),
+    weekdays: z.array(z.number().int().min(1).max(7)).optional(), until_date: z.string().optional()
+  }).strict();
+  server.tool("get_schedule", SCHEDULE_QUERY_DESCRIPTION, {
+    date: z.string().optional().describe("yyyy-MM-dd；默认手机本地今天"),
+    view: z.enum(["day", "week"]).default("day"), timezone: z.string().optional(),
+    from_ms: z.number().int().positive().optional(), to_ms: z.number().int().positive().optional(),
+    kind: z.enum(["all", "plan", "actual"]).default("all"), todo_id: z.string().optional(),
+    offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(500).default(100),
+    device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8)
+  }, async (args) => textResult(await runScheduleCommand("get_schedule", args)));
+  server.tool("schedule_action", SCHEDULE_ACTION_DESCRIPTION, {
+    operation: z.enum(["create", "update", "delete", "restore"]),
+    id: z.string().optional().describe("正式 block/occurrence/series ID，create 可省略"),
+    kind: z.enum(["plan", "actual"]).optional().describe("create 必填，更新时不可改变"),
+    title: z.string().max(240).optional(), note: z.string().max(4000).optional(), category: z.string().max(80).optional(), color: z.string().optional(),
+    start_at_ms: z.number().int().positive().optional(), end_at_ms: z.number().int().positive().optional(),
+    todo_id: z.string().optional(), reminder_minutes_before: z.number().int().min(-1).max(43200).optional(),
+    repeat: scheduleRepeatZod.optional(), scope: z.enum(["this", "all"]).optional(),
+    confirmed_by_user: z.boolean().optional().describe("创建 actual 时必须明确用户已确认真实发生事实；不能用 AI 猜测代替"),
+    user_confirmed: z.boolean().optional().describe("编辑 actual 时必须明确用户已确认修正；普通同步不能覆盖"),
+    device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8)
+  }, async (args) => textResult(await runScheduleCommand("schedule_action", args)));
 
   // v0.3.8.2：专注模式工具靠前注册，避免部分客户端只读取前若干个 schema 时漏掉接口。
   server.tool("get_focus_status", "读取当前 Focus；可传正式 todo_id 查询该 Todo 的累计实际 Focus session。Focus 记录实际投入，不代表 Todo 已完成；同一 Todo 可对应多次 Focus，任何时长都不得据此自动 complete Todo。", {

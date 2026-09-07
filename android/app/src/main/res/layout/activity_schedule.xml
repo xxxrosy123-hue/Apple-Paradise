@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="#FFFAF8F7">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="56dp"
+        android:orientation="horizontal" android:gravity="center_vertical" android:paddingHorizontal="12dp">
+        <Button android:id="@+id/scheduleBack" android:layout_width="48dp" android:layout_height="48dp" android:text="‹" android:contentDescription="返回" />
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+            android:text="时间轴" android:textSize="20sp" android:textStyle="bold" android:textColor="#FF453A44" />
+        <Button android:id="@+id/scheduleAddPlan" android:layout_width="wrap_content" android:layout_height="48dp" android:text="＋计划" />
+        <Button android:id="@+id/scheduleAddActual" android:layout_width="wrap_content" android:layout_height="48dp" android:text="＋实际" />
+    </LinearLayout>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="48dp" android:orientation="horizontal" android:gravity="center_vertical" android:paddingHorizontal="8dp">
+        <Button android:id="@+id/schedulePrev" android:layout_width="48dp" android:layout_height="48dp" android:text="‹" android:contentDescription="上一天或上一周" />
+        <Button android:id="@+id/scheduleDate" android:layout_width="0dp" android:layout_height="48dp" android:layout_weight="1" android:text="选择日期" />
+        <Button android:id="@+id/scheduleNext" android:layout_width="48dp" android:layout_height="48dp" android:text="›" android:contentDescription="下一天或下一周" />
+        <Button android:id="@+id/scheduleToday" android:layout_width="wrap_content" android:layout_height="48dp" android:text="今天" />
+    </LinearLayout>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="48dp" android:orientation="horizontal" android:gravity="center_vertical" android:paddingHorizontal="10dp">
+        <Button android:id="@+id/scheduleView" android:layout_width="wrap_content" android:layout_height="48dp" android:text="日视图" />
+        <Button android:id="@+id/scheduleMode" android:layout_width="wrap_content" android:layout_height="48dp" android:text="计划＋实际" />
+        <TextView android:id="@+id/scheduleCount" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:gravity="end" android:textSize="11sp" android:textColor="#FF726875" />
+    </LinearLayout>
+    <TextView android:id="@+id/scheduleHint" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingHorizontal="14dp" android:paddingVertical="5dp"
+        android:text="计划和实际分列显示。点击色块查看，亦可使用下方选择器。" android:textSize="11sp" android:textColor="#FF756B77" />
+    <Spinner android:id="@+id/schedulePicker" android:layout_width="match_parent" android:layout_height="48dp" android:paddingHorizontal="12dp" android:contentDescription="选择时间块进行查看或编辑" />
+    <TextView android:id="@+id/scheduleSelected" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:paddingHorizontal="14dp" android:paddingVertical="8dp"
+        android:text="选择时间块查看详情" android:textColor="#FF4C424E" android:textSize="12sp" />
+    <ScrollView android:id="@+id/scheduleScroll" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:fillViewport="false">
+        <dev.linjian.peek.ScheduleGridView android:id="@+id/scheduleGrid" android:layout_width="match_parent" android:layout_height="wrap_content" />
+    </ScrollView>
+</LinearLayout>

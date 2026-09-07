@@ -441,6 +441,17 @@ public class FocusMode {
         } catch (Exception e) { DebugState.append(ctx, "专注锁定页拉起失败：" + ScreenshotService.shortMsg(e)); }
     }
 
+    /** Read-only completed facts for Schedule. Never expose the mutable stored history. */
+    public static synchronized JSONObject completedSessionsSnapshot(Context ctx) {
+        try {
+            JSONObject current = state(ctx);
+            settleExpired(ctx, current, System.currentTimeMillis());
+            return new JSONObject(history(ctx).toString());
+        } catch (Exception e) {
+            throw new IllegalStateException("focus_history_unavailable", e);
+        }
+    }
+
     public static synchronized JSONObject config(Context ctx) {
         JSONObject s = state(ctx);
         try {

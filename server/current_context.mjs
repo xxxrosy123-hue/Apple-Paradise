@@ -223,6 +223,48 @@ function composeFocus(raw) {
   return out;
 }
 
+export const CURRENT_CONTEXT_SCHEDULE_LIST_LIMIT = 6;
+
+function compactScheduleBlock(raw) {
+  if (!isObject(raw) || !String(raw.id || "").trim() || !["plan", "actual"].includes(raw.kind)) return null;
+  const start = positiveNumberOrNull(raw.start_at_ms);
+  const end = positiveNumberOrNull(raw.end_at_ms);
+  // An ongoing Focus observation has a reliable start but no sealed actual end.
+  if (start === null || (end === null && raw.ongoing !== true) || (end !== null && end <= start)) return null;
+  return copyKnown(raw, ["id", "kind", "title", "category", "color", "start_at_ms", "end_at_ms", "todo_id", "focus_session_id", "source", "source_link", "user_overridden", "override_source", "ongoing", "observed_at_ms"]);
+}
+
+function composeSchedule(raw, focus, observedAtMs) {
+  if (!isObject(raw) || raw.available !== true || !Array.isArray(raw.remaining_plans))
+    return { available: false, ...(isObject(raw) ? { degraded: true, ...(raw.error ? {error:String(raw.error)} : {}) } : {}) };
+  const current = compactScheduleBlock(raw.current_plan);
+  const next = compactScheduleBlock(raw.next_plan);
+  const remaining = raw.remaining_plans.map(compactScheduleBlock).filter(x => x && x.kind === "plan").slice(0, CURRENT_CONTEXT_SCHEDULE_LIST_LIMIT);
+  let actual = compactScheduleBlock(raw.current_actual);
+  if (!actual && focus.available && focus.active && String(focus.session_id || "").trim() && positiveNumberOrNull(focus.started_at_ms) !== null && focus.started_at_ms <= observedAtMs) {
+    // Read-only observation of the ongoing Focus, not a completed actual block.
+    actual = { id:"ongoing:"+focus.session_id, kind:"actual", source:"focus_session", focus_session_id:focus.session_id,
+      title:focus.goal || "专注中", category:focus.category || "", todo_id:focus.todo_id || "",
+      start_at_ms:focus.started_at_ms, ongoing:true, observed_at_ms:observedAtMs };
+  }
+  const invalid = (raw.current_plan != null && (!current || current.kind !== "plan")) ||
+    (raw.next_plan != null && (!next || next.kind !== "plan")) ||
+    (raw.current_actual != null && (!compactScheduleBlock(raw.current_actual) || raw.current_actual.kind !== "actual")) ||
+    raw.remaining_plans.some(x => !compactScheduleBlock(x) || x.kind !== "plan");
+  if (invalid) return {available:false,degraded:true,error:"schedule_summary_invalid"};
+  const out = { available:true, source:String(raw.source || "android_local"),
+    current_plan:current, next_plan:next, remaining_plans:remaining,
+    remaining_plan_count:Math.max(0,Number(raw.remaining_plan_count)||0), current_actual:actual,
+    focus_projection_available:raw.focus_projection_available !== false };
+  const updated=positiveNumberOrNull(raw.updated_at_ms);
+  if(updated!==null)out.state_updated_at_ms=updated;
+  const queried=positiveNumberOrNull(raw.queried_at_ms);
+  if(queried!==null)out.queried_at_ms=queried;
+  if(raw.degraded===true || raw.focus_projection_available===false)out.degraded=true;
+  if(raw.focus_projection_error)out.focus_projection_error=String(raw.focus_projection_error);
+  return out;
+}
+
 function composeUsage(state) {
   const ready = Boolean(state.usage_permission_ready);
   const out = { available: ready, permission_ready: ready };
@@ -276,7 +318,11 @@ export function composeCurrentContext(lifeState, options = {}) {
   const todo = composeTodo(state.todo_state, String(state.local_date || ""), nowMs);
   const focus = composeFocus(state.focus_mode);
   const usage = composeUsage(state);
-  const snapshotPartial = Boolean(state.error) || !appGate.available || !todo.available || !focus.available;
+  const scheduleObservedAt = positiveNumberOrNull(state.schedule_state?.queried_at_ms) ?? stateUpdatedAt ?? nowMs;
+  const schedule = composeSchedule(state.schedule_state, focus, scheduleObservedAt);
+  const scheduleFreshness = freshnessEntry(schedule.queried_at_ms ?? state.schedule_state?.queried_at_ms ?? null, nowMs, schedule.source || source, transport, staleAfterMs);
+  schedule.stale = !schedule.available || scheduleFreshness.stale;
+  const snapshotPartial = Boolean(state.error) || !appGate.available || !todo.available || !focus.available || !schedule.available || schedule.degraded === true;
   const attentionItems = composeAttention({ appGate, todo, focus, freshness });
   const snapshotFreshness = { ...freshness, partial: snapshotPartial, degraded: snapshotPartial };
   if (state.error) snapshotFreshness.error = String(state.error);
@@ -288,6 +334,7 @@ export function composeCurrentContext(lifeState, options = {}) {
     app_gate: appGate,
     todo,
     focus,
+    schedule,
     usage,
     attention_items: attentionItems,
     freshness: {
@@ -296,6 +343,7 @@ export function composeCurrentContext(lifeState, options = {}) {
       app_gate: { ...freshness, available: appGate.available },
       todo: { ...freshness, available: todo.available, ...(todo.state_updated_at_ms ? { data_updated_at_ms: todo.state_updated_at_ms } : {}) },
       focus: { ...freshness, available: focus.available },
+      schedule: { ...scheduleFreshness, available: schedule.available, degraded: schedule.degraded === true, ...(schedule.state_updated_at_ms ? { data_updated_at_ms: schedule.state_updated_at_ms } : {}), ...(schedule.queried_at_ms ? { data_queried_at_ms: schedule.queried_at_ms } : {}) },
       usage: { ...freshness, available: usage.available }
     }
   };

@@ -12,7 +12,8 @@ function baseState() {
     battery_percent: 80, charging: false, network_type: "wifi", usage_permission_ready: true,
     screen_time_today_minutes: 120, top_apps_today: [],
     app_gate: { enabled: true, effective_controls: [], effective_locks: [], effective_allows: [] },
-    focus_mode: { active: false }, todo_state: { updated_at_ms: NOW, todos: [] }
+    focus_mode: { active: false }, todo_state: { updated_at_ms: NOW, todos: [] },
+    schedule_state: { available:true,source:"android_local",updated_at_ms:NOW,queried_at_ms:NOW,current_plan:null,next_plan:null,remaining_plan_count:0,remaining_plans:[],current_actual:null,focus_projection_available:true }
   };
 }
 
@@ -214,6 +215,49 @@ test("active Focus exposes only current Todo-session linkage", () => {
   assert.equal(f.available, true); assert.equal(f.active, true);
   assert.equal(f.session_id, "focus_123"); assert.equal(f.todo_id, "todo_abc"); assert.equal(f.category, "考研");
   assert.equal(Object.prototype.hasOwnProperty.call(f, "sessions"), false);
+});
+
+
+
+test("Schedule missing is unavailable, not an empty day", () => {
+  const s=baseState();delete s.schedule_state;
+  const c=composeCurrentContext(s,{nowMs:NOW});
+  assert.equal(c.schedule.available,false);assert.equal(c.freshness.schedule.stale,true);
+  assert.equal(c.freshness.snapshot.partial,true);assert.equal("remaining_plan_count" in c.schedule,false);
+});
+test("Schedule current/next/remaining and actual stay separate and bounded", () => {
+  const s=baseState();const block=(id,kind,start,end)=>({id,kind,title:id,start_at_ms:start,end_at_ms:end,todo_id:"todo-a",source:"user"});
+  s.schedule_state.current_plan=block("p","plan",NOW-1000,NOW+1000);
+  s.schedule_state.next_plan=block("n","plan",NOW+2000,NOW+3000);
+  s.schedule_state.current_actual=block("a","actual",NOW-500,NOW+500);
+  s.schedule_state.remaining_plans=Array.from({length:30},(_,i)=>block("p"+i,"plan",NOW+i*1000,NOW+i*1000+500));
+  s.schedule_state.remaining_plan_count=30;s.schedule_state.blocks=Array.from({length:100},(_,i)=>block("history"+i,"actual",NOW-i*1000,NOW-i*1000+500));
+  const c=composeCurrentContext(s,{nowMs:NOW});
+  assert.equal(c.schedule.current_plan.id,"p");assert.equal(c.schedule.next_plan.id,"n");assert.equal(c.schedule.current_actual.id,"a");
+  assert.equal(c.schedule.remaining_plan_count,30);assert.equal(c.schedule.remaining_plans.length,6);
+  assert.equal(JSON.stringify(c.schedule).includes("history99"),false);assert.equal("blocks" in c.schedule,false);
+  assert.equal(c.todo.open_count,0);assert.equal(c.schedule.current_plan.todo_id,"todo-a");
+});
+test("Schedule degraded source preserves other successful modules", () => {
+  const s=baseState();s.schedule_state.degraded=true;s.schedule_state.focus_projection_available=false;
+  const c=composeCurrentContext(s,{nowMs:NOW});assert.equal(c.schedule.available,true);assert.equal(c.schedule.degraded,true);
+  assert.equal(c.freshness.snapshot.partial,true);assert.equal(c.todo.available,true);assert.equal(c.app_gate.available,true);
+});
+test("Schedule source freshness uses its actual read timestamp", () => {
+  const s=baseState();s.schedule_state.queried_at_ms=NOW-60000;
+  const c=composeCurrentContext(s,{nowMs:NOW});assert.equal(c.schedule.stale,true);assert.equal(c.freshness.schedule.stale,true);
+  assert.equal(c.freshness.snapshot.stale,false);
+});
+test("Ongoing Focus is a read-only observation, not a completed actual", () => {
+  const s=baseState();s.focus_mode={active:true,session_id:"X",started_at_ms:NOW-60000,goal:"学习",todo_id:"todo-a",category:"考研"};
+  const c=composeCurrentContext(s,{nowMs:NOW});assert.equal(c.schedule.current_actual.ongoing,true);
+  assert.equal(c.schedule.current_actual.focus_session_id,"X");assert.equal("end_at_ms" in c.schedule.current_actual,false);
+  const old=baseState();old.updated_at_ms=NOW-60000;old.schedule_state.queried_at_ms=NOW-60000;old.focus_mode=s.focus_mode;
+  const cached=composeCurrentContext(old,{nowMs:NOW});assert.equal(cached.schedule.current_actual.observed_at_ms,NOW-60000);
+});
+test("Malformed Schedule facts are not silently converted to empty", () => {
+  const s=baseState();s.schedule_state.current_plan={id:"bad",kind:"plan",start_at_ms:NOW,end_at_ms:NOW-1};
+  const c=composeCurrentContext(s,{nowMs:NOW});assert.equal(c.schedule.available,false);assert.equal(c.schedule.degraded,true);
 });
 
 console.log("CurrentContextBehaviorTest: ALL PASS");
