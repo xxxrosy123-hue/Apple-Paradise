@@ -29,6 +29,12 @@ public class FocusMode {
     private static volatile boolean lockActivityVisible = false;
     private static volatile long lockActivityVisibleAt = 0L;
 
+    /** The single-process owner of both Focus JSON keys is FocusMode.class. */
+    private static void requireStateLock() {
+        if (!Thread.holdsLock(FocusMode.class))
+            throw new IllegalStateException("focus_state_lock_required");
+    }
+
     private static JSONObject defaultState() {
         JSONObject s = new JSONObject();
         try {
@@ -58,6 +64,7 @@ public class FocusMode {
     }
 
     private static JSONObject state(Context ctx) {
+        requireStateLock();
         try {
             String raw = AppPrefs.get(ctx).getString(KEY_STATE, "");
             if (raw != null && raw.trim().length() > 0) {
@@ -83,10 +90,12 @@ public class FocusMode {
     }
 
     private static void save(Context ctx, JSONObject s) {
+        requireStateLock();
         AppPrefs.get(ctx).edit().putString(KEY_STATE, s.toString()).commit();
     }
 
     private static JSONObject history(Context ctx) {
+        requireStateLock();
         try {
             String raw = AppPrefs.get(ctx).getString(KEY_SESSIONS, "");
             if (raw != null && !raw.trim().isEmpty()) return FocusSessionCore.normalizeHistory(new JSONObject(raw));
@@ -95,13 +104,38 @@ public class FocusMode {
     }
 
     private static void saveBoth(Context ctx, JSONObject current, JSONObject history) {
+        requireStateLock();
         AppPrefs.get(ctx).edit()
                 .putString(KEY_STATE, current.toString())
                 .putString(KEY_SESSIONS, FocusSessionCore.normalizeHistory(history).toString())
                 .commit();
     }
 
-    public static synchronized JSONObject handleCommand(Context ctx, JSONObject cmd) {
+    public static JSONObject handleCommand(Context ctx, JSONObject cmd) {
+        JSONObject out = handleCommandLocked(ctx, cmd);
+        if (!out.optBoolean("ok", false) || cmd == null) return out;
+        String action = cmd.optString("action", "");
+        String result = out.optString("result", "");
+        if (("start_focus_mode".equals(action) || "enable_focus_mode".equals(action))
+                && result.startsWith("focus_started")) {
+            JSONObject current = config(ctx);
+            // A later end/new start may have won after the persistence lock was released.
+            if (current.optBoolean("active", false)
+                    && out.optString("session_id", "").equals(current.optString("session_id", ""))) {
+                forceShowLockActivity(ctx);
+                ScreenshotService svc = ScreenshotService.getInstance();
+                if (cmd.optBoolean("screen_off", false) && svc != null) svc.doLockScreen();
+            }
+        } else if (("approve_focus_unlock".equals(action) || "temporary_focus_unlock".equals(action))
+                && result.startsWith("focus_temporary_unlocked:")) {
+            ScreenshotService svc = ScreenshotService.getInstance();
+            if (svc != null) svc.doHome();
+        }
+        return out;
+    }
+
+    private static synchronized JSONObject handleCommandLocked(Context ctx, JSONObject cmd) {
+        requireStateLock();
         String action = cmd == null ? "" : cmd.optString("action", "");
         try {
             if ("get_focus_status".equals(action)) return put(new JSONObject(), true, config(ctx).toString());
@@ -127,6 +161,7 @@ public class FocusMode {
     }
 
     private static JSONObject start(Context ctx, JSONObject cmd) throws Exception {
+        requireStateLock();
         JSONObject s = state(ctx);
         long now = System.currentTimeMillis();
         settleExpired(ctx, s, now);
@@ -165,9 +200,6 @@ public class FocusMode {
         log(s, "开启专注模式到 " + formatLocal(until));
         appendMessage(s, "ai", s.optString("message"), false);
         save(ctx, s);
-        forceShowLockActivity(ctx);
-        ScreenshotService svc = ScreenshotService.getInstance();
-        if (cmd.optBoolean("screen_off", false) && svc != null) svc.doLockScreen();
 
         JSONObject out = new JSONObject();
         out.put("ok", true);
@@ -179,6 +211,7 @@ public class FocusMode {
     }
 
     private static JSONObject setPlan(Context ctx, JSONObject cmd) throws Exception {
+        requireStateLock();
         JSONObject s = state(ctx);
         s.put("enabled", cmd.optBoolean("enabled", true));
         s.put("mode", "strict");
@@ -196,6 +229,7 @@ public class FocusMode {
     }
 
     private static JSONObject end(Context ctx, String reason) throws Exception {
+        requireStateLock();
         JSONObject s = state(ctx);
         long now = System.currentTimeMillis();
         JSONObject h = history(ctx);
@@ -220,6 +254,7 @@ public class FocusMode {
     }
 
     private static JSONObject querySessions(Context ctx, JSONObject cmd) throws Exception {
+        requireStateLock();
         JSONObject current = state(ctx);
         settleExpired(ctx, current, System.currentTimeMillis());
         String todoId = FocusSessionCore.clean(cmd.optString("todo_id", ""));
@@ -234,6 +269,7 @@ public class FocusMode {
     }
 
     private static JSONObject createRequest(Context ctx, String reason) throws Exception {
+        requireStateLock();
         JSONObject s = state(ctx);
         String text = reason == null ? "" : reason.trim();
         if (text.length() == 0) text = "我想申请应急解锁。";
@@ -253,6 +289,7 @@ public class FocusMode {
     }
 
     private static JSONObject reply(Context ctx, String message, boolean approved) throws Exception {
+        requireStateLock();
         JSONObject s = state(ctx);
         appendMessage(s, "ai", message == null || message.trim().length() == 0 ? "我在。" : message.trim(), approved);
         log(s, "专注小窗回复：" + message);
@@ -261,6 +298,7 @@ public class FocusMode {
     }
 
     private static JSONObject deny(Context ctx, String message) throws Exception {
+        requireStateLock();
         JSONObject s = state(ctx);
         markLatestRequest(s, "denied");
         appendMessage(s, "ai", message == null || message.trim().length() == 0 ? "这次先不放行，我陪你把这段时间守住。" : message.trim(), false);
@@ -270,6 +308,7 @@ public class FocusMode {
     }
 
     private static JSONObject approve(Context ctx, JSONObject cmd) throws Exception {
+        requireStateLock();
         JSONObject s = state(ctx);
         int minutes = Math.max(1, cmd.optInt("minutes", cmd.optInt("allowed_minutes", s.optInt("emergency_minutes", 1))));
         s.put("temporary_until_ms", System.currentTimeMillis() + minutes * 60000L);
@@ -279,8 +318,6 @@ public class FocusMode {
         appendMessage(s, "ai", message, true);
         log(s, "批准专注应急放行 " + minutes + " 分钟");
         save(ctx, s);
-        ScreenshotService svc = ScreenshotService.getInstance();
-        if (svc != null) svc.doHome();
         return put(new JSONObject(), true, "focus_temporary_unlocked:" + minutes + "min");
     }
 
@@ -302,7 +339,7 @@ public class FocusMode {
         } catch (Exception e) { return false; }
     }
 
-    public static void submitContactMessage(Context ctx, String text) { try { createRequest(ctx, text); } catch (Exception ignored) { } }
+    public static synchronized void submitContactMessage(Context ctx, String text) { try { createRequest(ctx, text); } catch (Exception ignored) { } }
 
     public static synchronized boolean isActive(Context ctx) {
         try {
@@ -314,12 +351,14 @@ public class FocusMode {
     }
 
     private static boolean isActiveRaw(Context ctx, JSONObject s, long now) throws Exception {
+        requireStateLock();
         if (s == null || !s.optBoolean("active", false)) return false;
         settleExpired(ctx, s, now);
         return s.optBoolean("active", false);
     }
 
     private static JSONObject settleExpired(Context ctx, JSONObject s, long now) throws Exception {
+        requireStateLock();
         if (s == null || !s.optBoolean("active", false)) return null;
         long until = s.optLong("until_ms", 0L);
         if (until <= 0L || now < until) return null;
@@ -341,21 +380,24 @@ public class FocusMode {
         return lockActivityVisible && (System.currentTimeMillis() - lockActivityVisibleAt < 30000L);
     }
 
-    public static synchronized void onForegroundPackage(Context ctx, String pkg) {
+    public static void onForegroundPackage(Context ctx, String pkg) {
         try {
             if (pkg == null || pkg.trim().length() == 0) return;
             String p = pkg.trim();
-            long now = System.currentTimeMillis();
-            JSONObject s = state(ctx);
-            if (!isActiveRaw(ctx, s, now)) return;
-            if (now < s.optLong("temporary_until_ms", 0L)) return;
-            if (isLockActivityVisible()) return;
             if (SELF_PACKAGE.equals(p) || isProtectedPackage(ctx, p)) return;
-            if (now - lastLockAt < 1800) return;
-            lastLockAt = now;
-            // 不再先执行 HOME：HOME 和 Activity 拉起会在部分系统上互相打架，表现为专注页闪退回桌面。
-            // 直接把专注锁定页拉到前台，由 Activity 覆盖当前界面。
-            startLockActivity(ctx);
+            boolean show;
+            synchronized (FocusMode.class) {
+                long now = System.currentTimeMillis();
+                JSONObject s = state(ctx);
+                if (!isActiveRaw(ctx, s, now)) return;
+                if (now < s.optLong("temporary_until_ms", 0L)) return;
+                if (isLockActivityVisible()) return;
+                if (now - lastLockAt < 1800) return;
+                lastLockAt = now;
+                show = true;
+            }
+            // Never launch an Activity or invoke external UI callbacks under the state lock.
+            if (show) startLockActivity(ctx);
         } catch (Exception e) { DebugState.append(ctx, "专注模式前台检查异常：" + ScreenshotService.shortMsg(e)); }
     }
 
