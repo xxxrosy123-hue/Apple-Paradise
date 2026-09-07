@@ -80,8 +80,11 @@ public class DebugState {
 }
 ''',
 'dev/linjian/peek/ScreenshotService.java': '''package dev.linjian.peek;
-public class ScreenshotService {
+public class ScreenshotService extends android.content.Context {
     private static final ScreenshotService INSTANCE = new ScreenshotService();
+    @Override public android.content.SharedPreferences getSharedPreferences(String name, int mode) {
+        throw new UnsupportedOperationException("Accessibility Context persistence is not used by this adapter");
+    }
     public static ScreenshotService getInstance() { return INSTANCE; }
     public static String currentPackage() { return ""; }
     public static String shortMsg(Exception e) { return e.getMessage() == null ? e.toString() : e.getMessage(); }
