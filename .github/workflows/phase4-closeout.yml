@@ -20,24 +20,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '--- all production FocusMode call sites and literal persistence keys ---'
-          rg -n --glob '*.java' 'FocusMode\.|focus_mode_state_v1|focus_sessions_v1' android/app/src/main/java || true
-          echo '--- direct literal key owners ---'
           python3 - <<'PY'
           from pathlib import Path
+          import re
           root=Path('android/app/src/main/java')
+          owners=[]
           for p in root.rglob('*.java'):
               s=p.read_text(encoding='utf-8')
+              for i,line in enumerate(s.splitlines(),1):
+                  if 'FocusMode.' in line or 'focus_mode_state_v1' in line or 'focus_sessions_v1' in line:
+                      print(f'{p}:{i}:{line.strip()}')
               if any('"'+key+'"' in s for key in ('focus_mode_state_v1','focus_sessions_v1')):
-                  print(p)
+                  owners.append(str(p))
                   if p.name != 'FocusMode.java':
                       raise SystemExit('unexpected direct Focus persistence owner: '+str(p))
+          assert len(owners)==1, owners
+          print('Focus persistence owner:', owners[0])
           PY
       - name: Apply minimal production synchronization patch
         shell: bash
         run: |
           set -euo pipefail
-          # The original current-key count is four, including its declaration.
+          # Original key count includes the declaration and direct read/write sites.
           sed -i "s/assert s.count('KEY_STATE') == 5/assert s.count('KEY_STATE') == 4/" .github/phase4_closeout_patch.py
           python3 .github/phase4_closeout_patch.py
           git diff --check
