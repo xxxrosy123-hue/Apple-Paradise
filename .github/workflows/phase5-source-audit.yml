@@ -1,0 +1,25 @@
+name: Phase 5 Source Audit
+on:
+  push:
+    branches: [v1-dev]
+    paths: ['.github/workflows/phase5-source-audit.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v1-dev
+      - name: Archive tracked project sources
+        run: |
+          git archive --format=zip --output=/tmp/phase5-source.zip HEAD android mcp server Agent.md docs .github/skills/apple-park-dev/SKILL.md
+          echo '--- Source inventory ---'
+          git ls-files 'android/app/src/main/java/**' 'android/app/src/main/res/**' 'android/tests/**' 'server/**' 'mcp/**' | grep -E 'Schedule|Calendar|Reminder|LifeState|CompanionService|Todo|Focus|current_context|server.js|worker.js|linjian_server.py|AppPrefs|MainActivity|AndroidManifest|build.sh' || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phase5-source
+          path: /tmp/phase5-source.zip
+          retention-days: 1
