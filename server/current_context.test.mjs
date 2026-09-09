@@ -13,7 +13,10 @@ function baseState() {
     screen_time_today_minutes: 120, top_apps_today: [],
     app_gate: { enabled: true, effective_controls: [], effective_locks: [], effective_allows: [] },
     focus_mode: { active: false }, todo_state: { updated_at_ms: NOW, todos: [] },
-    schedule_state: { available:true,source:"android_local",updated_at_ms:NOW,queried_at_ms:NOW,current_plan:null,next_plan:null,remaining_plan_count:0,remaining_plans:[],current_actual:null,focus_projection_available:true }
+    schedule_state: { available:true,source:"android_local",updated_at_ms:NOW,queried_at_ms:NOW,current_plan:null,next_plan:null,
+      today_remaining_plan_count:0,today_remaining_plans:[],remaining_plan_count:0,remaining_plans:[],remaining_scope:"today",
+      next_plan_search:{from_ms:NOW,to_ms:NOW+8*86400000,future_local_days:7,bounded:true,status:"none_within_window"},
+      current_actual:null,focus_projection_available:true }
   };
 }
 
@@ -229,14 +232,34 @@ test("Schedule current/next/remaining and actual stay separate and bounded", () 
   const s=baseState();const block=(id,kind,start,end)=>({id,kind,title:id,start_at_ms:start,end_at_ms:end,todo_id:"todo-a",source:"user"});
   s.schedule_state.current_plan=block("p","plan",NOW-1000,NOW+1000);
   s.schedule_state.next_plan=block("n","plan",NOW+2000,NOW+3000);
+  s.schedule_state.next_plan_search={from_ms:NOW,to_ms:NOW+8*86400000,future_local_days:7,bounded:true,status:"found"};
   s.schedule_state.current_actual=block("a","actual",NOW-500,NOW+500);
-  s.schedule_state.remaining_plans=Array.from({length:30},(_,i)=>block("p"+i,"plan",NOW+i*1000,NOW+i*1000+500));
-  s.schedule_state.remaining_plan_count=30;s.schedule_state.blocks=Array.from({length:100},(_,i)=>block("history"+i,"actual",NOW-i*1000,NOW-i*1000+500));
+  s.schedule_state.today_remaining_plans=Array.from({length:30},(_,i)=>block("p"+i,"plan",NOW+(i+1)*1000,NOW+(i+1)*1000+500));
+  s.schedule_state.today_remaining_plan_count=30;s.schedule_state.blocks=Array.from({length:100},(_,i)=>block("history"+i,"actual",NOW-i*1000,NOW-i*1000+500));
   const c=composeCurrentContext(s,{nowMs:NOW});
   assert.equal(c.schedule.current_plan.id,"p");assert.equal(c.schedule.next_plan.id,"n");assert.equal(c.schedule.current_actual.id,"a");
-  assert.equal(c.schedule.remaining_plan_count,30);assert.equal(c.schedule.remaining_plans.length,6);
+  assert.equal(c.schedule.today_remaining_plan_count,30);assert.equal(c.schedule.today_remaining_plans.length,6);
+  assert.equal(c.schedule.remaining_scope,"today");assert.equal(c.schedule.next_plan_search.status,"found");
   assert.equal(JSON.stringify(c.schedule).includes("history99"),false);assert.equal("blocks" in c.schedule,false);
   assert.equal(c.todo.open_count,0);assert.equal(c.schedule.current_plan.todo_id,"todo-a");
+});
+test("Schedule next plan can be tomorrow while today remaining is empty", () => {
+  const s=baseState();const tomorrow={id:"tomorrow",kind:"plan",title:"明天",start_at_ms:NOW+20*3600000,end_at_ms:NOW+21*3600000,source:"user"};
+  s.schedule_state.next_plan=tomorrow;s.schedule_state.next_plan_search={from_ms:NOW,to_ms:NOW+8*86400000,future_local_days:7,bounded:true,status:"found"};
+  const c=composeCurrentContext(s,{nowMs:NOW});
+  assert.equal(c.schedule.current_plan,null);assert.equal(c.schedule.today_remaining_plan_count,0);
+  assert.equal(c.schedule.next_plan.id,"tomorrow");assert.equal(c.schedule.next_plan_available,true);
+});
+test("Schedule no next plan is explicitly bounded", () => {
+  const c=composeCurrentContext(baseState(),{nowMs:NOW});
+  assert.equal(c.schedule.next_plan,null);assert.equal(c.schedule.next_plan_search.status,"none_within_window");
+  assert.equal(c.schedule.next_plan_search.bounded,true);assert.equal(c.schedule.next_plan_available,true);
+});
+test("Schedule missing next search metadata does not claim global absence", () => {
+  const s=baseState();delete s.schedule_state.next_plan_search;
+  const c=composeCurrentContext(s,{nowMs:NOW});
+  assert.equal(c.schedule.available,true);assert.equal(c.schedule.degraded,true);assert.equal(c.schedule.next_plan_available,false);
+  assert.equal(c.schedule.next_plan_search.status,"unavailable");assert.equal(c.freshness.snapshot.partial,true);
 });
 test("Schedule degraded source preserves other successful modules", () => {
   const s=baseState();s.schedule_state.degraded=true;s.schedule_state.focus_projection_available=false;

@@ -3,9 +3,9 @@
  */
 export const SCHEDULE_SOURCE_OF_TRUTH = "android_local:schedule_state_v1";
 export const SCHEDULE_QUERY_DESCRIPTION = "读取苹果乐园独立 Schedule 时间轴，按手机本地日期或绝对范围查询 plan/actual。计划不是实际，Todo deadline 不是计划时间。返回 Android 正式事实及可靠 Focus completed-session 投影；不把推测写成 actual，不修改 Todo 完成状态。历史使用分页查询，Server 只传输命令和缓存摘要。";
-export const SCHEDULE_ACTION_DESCRIPTION = "创建、修改、删除计划或用户确认的实际时间块。plan 表示安排，不代表已经发生；deadline 与 Schedule 不同。actual 只能来自用户明确记录、可靠实际来源或用户确认后的 AI 补录，禁止把聊天、前台 App、UsageStats 推测直接写成正式 actual。Focus 由 Android 自动投影，不可伪造 focus_session 来源。用户修改的 actual 优先，普通同步不得覆盖；同一来源幂等，删除来源投影会保留排除记录。Schedule 不自动 complete/reopen Todo，Server 不替 AI 做主观判断。重复计划只支持 daily/weekly/指定星期；修改单次用 occurrence ID+scope=this，修改整个规则用 series ID+scope=all；future 未实现。";
+export const SCHEDULE_ACTION_DESCRIPTION = "创建、修改、删除计划或用户确认的实际时间块。plan 表示安排，不代表已经发生；deadline 与 Schedule 不同。actual 只能来自用户明确记录、可靠实际来源或用户确认后的 AI 补录，禁止把聊天、前台 App、UsageStats 推测直接写成正式 actual。Focus 由 Android 自动投影，不可伪造 focus_session 来源。用户修改的 actual 优先，普通同步不得覆盖；同一来源幂等，删除来源投影会保留排除记录。MCP create 必须提供可复用 idempotency_key，或提供稳定的 schedule_ 领域 id；重试必须复用同一值。transport command id、block id 与 idempotency key 含义不同。restore 仅适用于仍有来源的 Focus 投影或单次重复 occurrence，不承诺恢复普通手工块或已删除 series。Schedule 不自动 complete/reopen Todo，Server 不替 AI 做主观判断。重复计划只支持 daily/weekly/指定星期；修改单次用 occurrence ID+scope=this，修改整个规则用 series ID+scope=all；future 未实现。";
 export const SCHEDULE_QUERY_FIELDS = ["id","date","view","timezone","from_ms","to_ms","kind","todo_id","offset","limit"];
-export const SCHEDULE_ACTION_FIELDS = ["operation","id","kind","title","note","category","color","start_at_ms","end_at_ms","todo_id","reminder_minutes_before","repeat","scope","confirmed_by_user","user_confirmed"];
+export const SCHEDULE_ACTION_FIELDS = ["operation","id","idempotency_key","kind","title","note","category","color","start_at_ms","end_at_ms","todo_id","reminder_minutes_before","repeat","scope","confirmed_by_user","user_confirmed"];
 const str = (description, options = {}) => ({ type: "string", description, ...options });
 const integer = (description, options = {}) => ({ type: "integer", description, ...options });
 const boolean = (description) => ({ type: "boolean", description });
@@ -33,8 +33,9 @@ export const SCHEDULE_QUERY_SCHEMA = {
 };
 export const SCHEDULE_ACTION_SCHEMA = {
   type:"object",additionalProperties:false,properties:{
-    operation:str("操作",{enum:["create","update","delete","restore"]}),
-    id:str("稳定 block/occurrence/series ID；create 可省略由手机生成"),
+    operation:str("操作；restore 仅支持仍有来源的 Focus 投影或单次重复 occurrence",{enum:["create","update","delete","restore"]}),
+    id:str("稳定 block/occurrence/series ID；create 可用 schedule_ ID 作为幂等身份"),
+    idempotency_key:str("MCP create 的稳定幂等键，8～128 位字母、数字、点、下划线、冒号或短横；超时重试必须复用",{minLength:8,maxLength:128,pattern:"^[A-Za-z0-9._:-]+$"}),
     kind:str("create 必填，plan 或 actual；更新不能改变 kind",{enum:["plan","actual"]}),
     title:str("时间块标题"),note:str("可选备注"),category:str("自由分类，不绑定硬编码应用类别"),color:str("可选 #RRGGBB"),
     start_at_ms:integer("绝对开始时间 epoch 毫秒"),end_at_ms:integer("绝对结束时间 epoch 毫秒，必须大于开始"),
@@ -64,9 +65,17 @@ export function normalizeScheduleAction(args={}) {
   const op=out.operation;
   if(!["create","update","delete","restore"].includes(op))fail("schedule_operation_invalid");
   if(op!=="create"&&!String(out.id||"").trim())fail("schedule_id_required");
+  if(op!=="create"&&out.idempotency_key!==undefined)fail("schedule_idempotency_create_only");
   if(op==="create"){
     if(!["plan","actual"].includes(out.kind))fail("schedule_kind_required");
     if(!String(out.title||"").trim())fail("schedule_title_required");
+    const requestedId=String(out.id||"").trim();
+    if(requestedId&&!requestedId.startsWith("schedule_"))fail("schedule_id_invalid");
+    let key=String(out.idempotency_key||"").trim();
+    if(!key&&requestedId)key="domain:"+requestedId;
+    if(!key)fail("schedule_idempotency_required");
+    if(key.length<8||key.length>128||!/^[A-Za-z0-9._:-]+$/.test(key))fail("schedule_idempotency_key_invalid");
+    out.idempotency_key=key;
     integerValue(out.start_at_ms,"start_at_ms");integerValue(out.end_at_ms,"end_at_ms");
     if(out.start_at_ms<=0||out.end_at_ms<=out.start_at_ms)fail("schedule_invalid_time_range");
   }

@@ -1082,7 +1082,7 @@ function makeServer() {
   };
 
 
-  server.tool("get_current_context", "调用本工具获取苹果乐园当前共享事实，再据此由 AI 做判断。返回的是事实快照，不代表苹果乐园已经替 AI 做出‘该提醒、允许、拒绝或批评’的主观决定。本工具不会执行用户任务、修改 Todo、主动改变 AppGate/Focus 决策或自动放行；底层模块可能在读取时清理已经按既定 TTL 自然过期的状态。", { device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(10).default(5) }, async ({ device_id = DEFAULT_DEVICE, wait_seconds = 5 }) => {
+  server.tool("get_current_context", "调用本工具获取苹果乐园当前共享事实，再据此由 AI 做判断。返回的是事实快照，不代表苹果乐园已经替 AI 做出‘该提醒、允许、拒绝或批评’的主观决定。本工具不会执行用户任务、修改 Todo、主动改变 AppGate/Focus 决策或自动放行；底层模块可能在读取时清理已经按既定 TTL 自然过期的状态。Schedule 的 current_plan 只表示当前，today_remaining 只表示今天；next_plan 在 next_plan_search 标明的有界未来窗口内查找，none_within_window 不代表窗口之外确定没有计划。", { device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(10).default(5) }, async ({ device_id = DEFAULT_DEVICE, wait_seconds = 5 }) => {
   return textResult(await getCurrentContextSnapshot(device_id, wait_seconds));
 });
 
@@ -1156,8 +1156,9 @@ function makeServer() {
     device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8)
   }, async (args) => textResult(await runScheduleCommand("get_schedule", args)));
   server.tool("schedule_action", SCHEDULE_ACTION_DESCRIPTION, {
-    operation: z.enum(["create", "update", "delete", "restore"]),
-    id: z.string().optional().describe("正式 block/occurrence/series ID，create 可省略"),
+    operation: z.enum(["create", "update", "delete", "restore"]).describe("restore 仅支持仍有来源的 Focus 投影或单次重复 occurrence；普通手工块和已删除 series 不可恢复"),
+    id: z.string().optional().describe("正式 block/occurrence/series ID；create 可提供稳定 schedule_ ID 作为幂等身份"),
+    idempotency_key: z.string().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/).optional().describe("create 的稳定幂等键；超时重试必须复用同一值。create 若不提供本字段，则必须提供稳定 id"),
     kind: z.enum(["plan", "actual"]).optional().describe("create 必填，更新时不可改变"),
     title: z.string().max(240).optional(), note: z.string().max(4000).optional(), category: z.string().max(80).optional(), color: z.string().optional(),
     start_at_ms: z.number().int().positive().optional(), end_at_ms: z.number().int().positive().optional(),

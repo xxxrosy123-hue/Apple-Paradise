@@ -31,6 +31,7 @@ public final class ScheduleBehaviorTest {
         c.update("schedule_a",o("end_at_ms",b),4,true,null);
         yes(c.get("schedule_a",null).optBoolean("user_overridden"),"actual edit flag");
         c.delete("schedule_p",5,null); yes(c.get("schedule_p",null)==null,"plan deleted");
+        fails(()->c.restore("schedule_p",6,null),"restore_not_supported");
         c.delete("schedule_a",6,null); yes(c.get("schedule_a",null)==null,"actual deleted");
         fails(()->c.create(block("actual","bad",b,a),"schedule_bad",7,"user"),"invalid_time_range");
         fails(()->c.create(block("plan","bad",a,a),"schedule_bad2",7,"user"),"invalid_time_range");
@@ -99,6 +100,36 @@ public final class ScheduleBehaviorTest {
         eq(ScheduleCore.format(occurrence.getLong("start_at_ms"),"HH:mm",NEW_YORK),"09:00","DST wall clock");
         eq(occurrence.getLong("start_at_ms")-ny,25L*3600000,"not fixed 24h");
     }
+    static void testDstResolutionAndReminders() {
+        long gap=ScheduleCore.localTime("2026-03-08","02:30",NEW_YORK);
+        eq(ScheduleCore.format(gap,"yyyy-MM-dd HH:mm",NEW_YORK),"2026-03-08 03:30","gap shifts by transition width");
+        long fold=ScheduleCore.localTime("2026-11-01","01:30",NEW_YORK);
+        eq(NEW_YORK.getOffset(fold),-4*3600000,"fold chooses earlier daylight offset");
+
+        ScheduleCore c=ScheduleCore.empty();
+        long start=ScheduleCore.localTime("2026-03-07","02:30",NEW_YORK);
+        long end=ScheduleCore.localTime("2026-03-07","04:00",NEW_YORK);
+        JSONObject gapSeries=block("plan","DST gap",start,end);
+        ScheduleCore.put(gapSeries,"reminder_minutes_before",30);
+        ScheduleCore.put(gapSeries,"repeat",o("frequency","daily","timezone","America/New_York","until_date","2026-03-09"));
+        c.create(gapSeries,"schedule_gap",1,"user");
+        long[] gapDay=ScheduleCore.dayRange("2026-03-08",NEW_YORK);
+        JSONObject occurrence=find(query(c,gapDay[0],gapDay[1],null),ScheduleCore.occurrenceId("schedule_gap","2026-03-08"));
+        yes(occurrence!=null,"gap occurrence does not break day query");
+        eq(ScheduleCore.format(occurrence.getLong("start_at_ms"),"HH:mm",NEW_YORK),"03:30","gap occurrence shifted");
+        eq(occurrence.getString("occurrence_date"),"2026-03-08","gap provenance date retained");
+        eq(occurrence.getString("source_link"),"schedule_series:schedule_gap:2026-03-08","gap provenance link retained");
+        eq(c.reminders(gapDay[0],gapDay[1]).length(),1,"gap reminder rebuild survives");
+
+        long nightStart=ScheduleCore.localTime("2026-10-31","23:30",NEW_YORK);
+        long nightEnd=ScheduleCore.localTime("2026-11-01","01:30",NEW_YORK);
+        JSONObject night=block("plan","跨午夜",nightStart,nightEnd);
+        ScheduleCore.put(night,"repeat",o("frequency","daily","timezone","America/New_York","until_date","2026-11-02"));
+        c.create(night,"schedule_fold_night",2,"user");
+        long[] foldDay=ScheduleCore.dayRange("2026-11-01",NEW_YORK);
+        JSONObject folded=find(query(c,foldDay[0],foldDay[1],null),ScheduleCore.occurrenceId("schedule_fold_night","2026-10-31"));
+        yes(folded!=null&&folded.getLong("end_at_ms")>folded.getLong("start_at_ms"),"fold cross-midnight remains valid");
+    }
     static void testSerializationAndPagination() {
         ScheduleCore c=ScheduleCore.empty();long a=t("2026-09-07","09:00");Set<String> ids=new HashSet<>();
         for(int i=0;i<650;i++) { String id="schedule_"+i;ids.add(id);c.create(block("plan","B"+i,a+i*1000,a+i*1000+500),id,i+1,"user"); }
@@ -111,6 +142,14 @@ public final class ScheduleBehaviorTest {
         eq(count,650,"pagination reaches all");
         fails(()->restored.create(block("plan","duplicate",a,a+1000),"schedule_0",700,"user"),"id_exists");
     }
+    static void testIdempotencyLedgerBounded() {
+        ScheduleCore core=ScheduleCore.empty();long start=t("2026-09-07","09:00");
+        for(int i=0;i<ScheduleCore.MAX_IDEMPOTENCY_RECORDS+20;i++)
+            core.createIdempotent(block("plan","Intent "+i,start+i*1000,start+i*1000+500),"",i+1,"ai","create-key-"+i);
+        eq(core.persisted().getJSONArray("idempotency").length(),ScheduleCore.MAX_IDEMPOTENCY_RECORDS,"idempotency ledger bounded");
+        ScheduleCore restored=ScheduleCore.fromJson(core.persisted().toString());
+        eq(restored.persisted().getJSONArray("idempotency").length(),ScheduleCore.MAX_IDEMPOTENCY_RECORDS,"bounded ledger persists");
+    }
     static void testContext() {
         ScheduleCore c=ScheduleCore.empty();long now=t("2026-09-07","09:30");
         c.create(block("plan","当前",now-1800000,now+1800000),"schedule_now",1,"user");
@@ -121,11 +160,24 @@ public final class ScheduleBehaviorTest {
         eq(summary.getJSONObject("current_plan").getString("id"),"schedule_now","current plan");
         eq(summary.getJSONObject("next_plan").getString("id"),"schedule_next","next plan");
         eq(summary.getJSONObject("current_actual").getString("id"),"schedule_actual","actual present");
-        yes(summary.getJSONArray("remaining_plans").length()<=6,"summary bounded");
+        yes(summary.getJSONArray("today_remaining_plans").length()<=6,"today summary bounded");
+        eq(summary.getString("remaining_scope"),"today","legacy remaining scope explicit");
+        eq(summary.getJSONObject("next_plan_search").getString("status"),"found","next search found");
         yes(!summary.has("blocks")&&!summary.has("sessions"),"no history dump");
+
+        ScheduleCore tomorrow=ScheduleCore.empty();long late=t("2026-09-07","23:00");
+        tomorrow.create(block("plan","已经结束",late-7200000,late-3600000),"schedule_ended",1,"user");
+        tomorrow.create(block("plan","明天",t("2026-09-08","09:00"),t("2026-09-08","10:00")),"schedule_tomorrow",2,"user");
+        JSONObject nextDay=tomorrow.summary(late,TOKYO,null);
+        yes(nextDay.isNull("current_plan"),"no current plan after today's last item");
+        eq(nextDay.getJSONArray("today_remaining_plans").length(),0,"today remaining stays today");
+        eq(nextDay.getJSONObject("next_plan").getString("id"),"schedule_tomorrow","next plan crosses local day");
+        JSONObject empty=ScheduleCore.empty().summary(late,TOKYO,null);
+        yes(empty.isNull("next_plan"),"no plan in bounded window");
+        eq(empty.getJSONObject("next_plan_search").getString("status"),"none_within_window","absence remains bounded");
     }
     public static void main(String[] args) {
-        testCrudAndSeparation();testTimeAndBinding();testFocusProjection();testRecurrence();testSerializationAndPagination();testContext();
+        testCrudAndSeparation();testTimeAndBinding();testFocusProjection();testRecurrence();testDstResolutionAndReminders();testSerializationAndPagination();testIdempotencyLedgerBounded();testContext();
         System.out.println("ScheduleBehaviorTest: PASS (production core, CRUD, timezones, recurrence, source override, pagination, context)");
     }
 }

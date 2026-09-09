@@ -231,15 +231,29 @@ function compactScheduleBlock(raw) {
   const end = positiveNumberOrNull(raw.end_at_ms);
   // An ongoing Focus observation has a reliable start but no sealed actual end.
   if (start === null || (end === null && raw.ongoing !== true) || (end !== null && end <= start)) return null;
-  return copyKnown(raw, ["id", "kind", "title", "category", "color", "start_at_ms", "end_at_ms", "todo_id", "focus_session_id", "source", "source_link", "user_overridden", "override_source", "ongoing", "observed_at_ms"]);
+  return copyKnown(raw, ["id", "kind", "title", "category", "color", "start_at_ms", "end_at_ms", "todo_id", "focus_session_id", "source", "source_link", "user_overridden", "override_source", "override_at_ms", "series_id", "occurrence_date", "ongoing", "observed_at_ms"]);
+}
+
+function compactNextPlanSearch(raw, next) {
+  if (!isObject(raw) || raw.bounded !== true || !["found", "none_within_window"].includes(raw.status)) return null;
+  const from = positiveNumberOrNull(raw.from_ms);
+  const to = positiveNumberOrNull(raw.to_ms);
+  const days = numberOrNull(raw.future_local_days);
+  if (from === null || to === null || to <= from || days === null || days < 1 || days > 31) return null;
+  if (raw.status === "found" && (!next || next.start_at_ms < from || next.start_at_ms >= to)) return null;
+  if (raw.status === "none_within_window" && next) return null;
+  return { from_ms:from, to_ms:to, future_local_days:days, bounded:true, status:raw.status };
 }
 
 function composeSchedule(raw, focus, observedAtMs) {
-  if (!isObject(raw) || raw.available !== true || !Array.isArray(raw.remaining_plans))
+  const remainingSource = Array.isArray(raw?.today_remaining_plans) ? raw.today_remaining_plans : raw?.remaining_plans;
+  if (!isObject(raw) || raw.available !== true || !Array.isArray(remainingSource))
     return { available: false, ...(isObject(raw) ? { degraded: true, ...(raw.error ? {error:String(raw.error)} : {}) } : {}) };
   const current = compactScheduleBlock(raw.current_plan);
-  const next = compactScheduleBlock(raw.next_plan);
-  const remaining = raw.remaining_plans.map(compactScheduleBlock).filter(x => x && x.kind === "plan").slice(0, CURRENT_CONTEXT_SCHEDULE_LIST_LIMIT);
+  const rawNext = compactScheduleBlock(raw.next_plan);
+  const search = compactNextPlanSearch(raw.next_plan_search, rawNext);
+  const next = search ? rawNext : null;
+  const remaining = remainingSource.map(compactScheduleBlock).filter(x => x && x.kind === "plan").slice(0, CURRENT_CONTEXT_SCHEDULE_LIST_LIMIT);
   let actual = compactScheduleBlock(raw.current_actual);
   if (!actual && focus.available && focus.active && String(focus.session_id || "").trim() && positiveNumberOrNull(focus.started_at_ms) !== null && focus.started_at_ms <= observedAtMs) {
     // Read-only observation of the ongoing Focus, not a completed actual block.
@@ -248,19 +262,23 @@ function composeSchedule(raw, focus, observedAtMs) {
       start_at_ms:focus.started_at_ms, ongoing:true, observed_at_ms:observedAtMs };
   }
   const invalid = (raw.current_plan != null && (!current || current.kind !== "plan")) ||
-    (raw.next_plan != null && (!next || next.kind !== "plan")) ||
+    (raw.next_plan != null && (!rawNext || rawNext.kind !== "plan")) ||
     (raw.current_actual != null && (!compactScheduleBlock(raw.current_actual) || raw.current_actual.kind !== "actual")) ||
-    raw.remaining_plans.some(x => !compactScheduleBlock(x) || x.kind !== "plan");
+    remainingSource.some(x => !compactScheduleBlock(x) || x.kind !== "plan");
   if (invalid) return {available:false,degraded:true,error:"schedule_summary_invalid"};
   const out = { available:true, source:String(raw.source || "android_local"),
-    current_plan:current, next_plan:next, remaining_plans:remaining,
-    remaining_plan_count:Math.max(0,Number(raw.remaining_plan_count)||0), current_actual:actual,
+    current_plan:current, today_remaining_plans:remaining,
+    today_remaining_plan_count:Math.max(0,Number(raw.today_remaining_plan_count ?? raw.remaining_plan_count)||0),
+    remaining_plans:remaining, remaining_plan_count:Math.max(0,Number(raw.today_remaining_plan_count ?? raw.remaining_plan_count)||0),
+    remaining_scope:"today", next_plan:next,
+    next_plan_available:Boolean(search), next_plan_search:search || {status:"unavailable",bounded:true}, current_actual:actual,
     focus_projection_available:raw.focus_projection_available !== false };
   const updated=positiveNumberOrNull(raw.updated_at_ms);
   if(updated!==null)out.state_updated_at_ms=updated;
   const queried=positiveNumberOrNull(raw.queried_at_ms);
   if(queried!==null)out.queried_at_ms=queried;
-  if(raw.degraded===true || raw.focus_projection_available===false)out.degraded=true;
+  if(raw.degraded===true || raw.focus_projection_available===false || !search)out.degraded=true;
+  if(!search)out.next_plan_search_error="missing_or_invalid_search_metadata";
   if(raw.focus_projection_error)out.focus_projection_error=String(raw.focus_projection_error);
   return out;
 }

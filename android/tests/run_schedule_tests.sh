@@ -6,8 +6,11 @@ OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 mkdir -p "$OUT/classes"
 javac -encoding UTF-8 --release 11 -cp "$FOCUS_JSON_JAR" -d "$OUT/classes" \
-  android/app/src/main/java/dev/linjian/peek/ScheduleCore.java android/tests/ScheduleBehaviorTest.java
+  android/app/src/main/java/dev/linjian/peek/ScheduleCore.java \
+  android/app/src/main/java/dev/linjian/peek/ScheduleReminderCore.java \
+  android/tests/ScheduleBehaviorTest.java android/tests/ScheduleReminderBehaviorTest.java
 java -ea -cp "$OUT/classes:$FOCUS_JSON_JAR" dev.linjian.peek.ScheduleBehaviorTest
+java -ea -cp "$OUT/classes:$FOCUS_JSON_JAR" dev.linjian.peek.ScheduleReminderBehaviorTest
 python3 android/tests/focus_mode_test_stubs.py "$OUT/stubs"
 python3 android/tests/schedule_state_test_stubs.py "$OUT/stubs"
 find "$OUT/stubs" -name '*.java' -print > "$OUT/sources.txt"

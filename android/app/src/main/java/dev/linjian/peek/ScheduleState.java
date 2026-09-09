@@ -109,13 +109,24 @@ public final class ScheduleState {
                     String id=text(cmd,"block_id"); if(id.isEmpty()) id=text(cmd,"id");
                     if(op.equals("create")) {
                         if(!id.isEmpty() && !id.startsWith("schedule_")) throw ScheduleCore.bad("schedule_id_invalid");
-                        if(id.isEmpty()) id=ScheduleCore.newId();
                         String source=text(cmd,"source");
                         if(source.isEmpty()) source="ai".equals(text(cmd,"actor"))?"ai":"user";
                         if(!source.equals("user")&&!source.equals("ai")&&!source.equals("ai_confirmed")) throw ScheduleCore.bad("schedule_source_invalid");
                         if("actual".equals(text(cmd,"kind")) && cmd.optLong("end_at_ms",0)>now+5000L) throw ScheduleCore.bad("schedule_actual_cannot_end_in_future");
-                        JSONObject b=core.create(input(cmd),id,now,source);
-                        out=ScheduleCore.obj("ok",true,"result","schedule_created","block",b);
+                        String key=text(cmd,"idempotency_key");
+                        boolean remote=source.equals("ai")||source.equals("ai_confirmed")||"ai".equals(text(cmd,"actor"));
+                        if(remote&&key.isEmpty()&&!id.isEmpty()) key="domain:"+id;
+                        if(remote&&key.isEmpty()) throw ScheduleCore.bad("schedule_idempotency_required");
+                        if(remote) {
+                            JSONObject created=core.createIdempotent(input(cmd),id,now,source,key);
+                            out=ScheduleCore.obj("ok",true,"result","schedule_created","block",created.optJSONObject("block"),
+                                    "idempotency_key",created.optString("idempotency_key"),
+                                    "idempotency_replayed",created.optBoolean("idempotency_replayed"));
+                        } else {
+                            if(id.isEmpty()) id=ScheduleCore.newId();
+                            JSONObject b=core.create(input(cmd),id,now,source);
+                            out=ScheduleCore.obj("ok",true,"result","schedule_created","block",b);
+                        }
                     } else {
                         if(id.isEmpty()) throw ScheduleCore.bad("schedule_id_required");
                         if(op.equals("restore")) out=core.restore(id,now,facts);

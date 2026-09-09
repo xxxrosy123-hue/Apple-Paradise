@@ -3,6 +3,7 @@ package dev.linjian.peek;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -24,20 +25,25 @@ final class ScheduleCore {
     static final int VERSION = 1;
     static final int DEFAULT_LIMIT = 100;
     static final int MAX_LIMIT = 500;
+    static final int MAX_IDEMPOTENCY_RECORDS = 256;
     static final long DAY_MS = 86400000L;
     private JSONObject document;
 
     private ScheduleCore(JSONObject document) { this.document = document; }
     static ScheduleCore empty() {
         return new ScheduleCore(obj("schema_version", VERSION, "updated_at_ms", 0L,
-                "blocks", new JSONArray(), "overrides", new JSONArray(), "tombstones", new JSONArray()));
+                "blocks", new JSONArray(), "overrides", new JSONArray(), "tombstones", new JSONArray(),
+                "idempotency", new JSONArray()));
     }
     static ScheduleCore fromJson(String raw) {
         if (clean(raw).isEmpty()) return empty();
         try {
             JSONObject d = new JSONObject(raw);
             if (d.optInt("schema_version", 0) != VERSION) throw bad("schedule_schema_unsupported");
-            for (String key : new String[]{"blocks", "overrides", "tombstones"})
+            if(!d.has("idempotency")) put(d,"idempotency",new JSONArray());
+            JSONArray idempotency=d.optJSONArray("idempotency");
+            if(idempotency!=null) while(idempotency.length()>MAX_IDEMPOTENCY_RECORDS) idempotency.remove(0);
+            for (String key : new String[]{"blocks", "overrides", "tombstones", "idempotency"})
                 if (!(d.opt(key) instanceof JSONArray)) throw bad("schedule_invalid_" + key);
             ScheduleCore core = new ScheduleCore(d);
             core.checkIntegrity();
@@ -103,6 +109,15 @@ final class ScheduleCore {
             JSONObject t=arr(document,"tombstones").optJSONObject(i);
             if(t==null || clean(t.optString("id")).isEmpty()) throw bad("schedule_tombstone_invalid");
         }
+        Set<String> keys=new HashSet<>();
+        JSONArray records=arr(document,"idempotency");
+        for(int i=0;i<records.length();i++) {
+            JSONObject record=records.optJSONObject(i);
+            if(record==null || clean(record.optString("key")).isEmpty() || !record.optString("key").equals(record.optString("id")) || !keys.add(record.optString("key")) ||
+                    clean(record.optString("fingerprint")).isEmpty() || clean(record.optString("block_id")).isEmpty() ||
+                    record.optJSONObject("result_block")==null) throw bad("schedule_idempotency_invalid");
+            validateBlock(record.optJSONObject("result_block"));
+        }
     }
     static String newId() { return "schedule_"+UUID.randomUUID(); }
     static String focusId(String sessionId) {
@@ -122,9 +137,34 @@ final class ScheduleCore {
     }
     static long localMidnight(String date,TimeZone zone) { return localTime(date,"00:00",zone); }
     static long localTime(String date,String time,TimeZone zone) {
-        SimpleDateFormat f=new SimpleDateFormat("yyyy-MM-dd HH:mm",Locale.US); f.setLenient(false); f.setTimeZone(zone);
-        try { Date d=f.parse(date+" "+time); if(d==null || !f.format(d).equals(date+" "+time)) throw bad("schedule_local_time_invalid"); return d.getTime(); }
-        catch(ParseException e) { throw bad("schedule_local_time_invalid"); }
+        String wanted=date+" "+time;
+        SimpleDateFormat wallParser=new SimpleDateFormat("yyyy-MM-dd HH:mm",Locale.US);
+        wallParser.setLenient(false); wallParser.setTimeZone(TimeZone.getTimeZone("UTC"));
+        final long wall;
+        try {
+            Date parsed=wallParser.parse(wanted);
+            if(parsed==null || !wallParser.format(parsed).equals(wanted)) throw bad("schedule_local_time_invalid");
+            wall=parsed.getTime();
+        } catch(ParseException e) { throw bad("schedule_local_time_invalid"); }
+
+        // Resolve the wall time explicitly. A fold has two valid instants; the earlier one wins.
+        Set<Integer> offsets=new HashSet<>();
+        offsets.add(zone.getRawOffset());
+        for(int days=-2;days<=2;days++) offsets.add(zone.getOffset(wall+days*DAY_MS));
+        Long earliest=null;
+        for(int offset:offsets) {
+            long candidate=wall-offset;
+            if(wanted.equals(format(candidate,"yyyy-MM-dd HH:mm",zone)) && (earliest==null||candidate<earliest)) earliest=candidate;
+        }
+        if(earliest!=null) return earliest;
+
+        // In a gap, lenient GregorianCalendar moves the missing wall time forward by the gap.
+        Calendar normalized=Calendar.getInstance(zone,Locale.US); normalized.setLenient(true); normalized.clear();
+        normalized.set(Integer.parseInt(date.substring(0,4)),Integer.parseInt(date.substring(5,7))-1,
+                Integer.parseInt(date.substring(8,10)),Integer.parseInt(time.substring(0,2)),Integer.parseInt(time.substring(3,5)),0);
+        long shifted=normalized.getTimeInMillis();
+        if(format(shifted,"yyyy-MM-dd",zone).equals(date)) return shifted;
+        throw bad("schedule_local_time_invalid");
     }
     static String addDays(String date,int days) {
         Calendar c=Calendar.getInstance(TimeZone.getTimeZone("UTC"),Locale.US); c.setTimeInMillis(localMidnight(date,TimeZone.getTimeZone("UTC"))); c.add(Calendar.DATE,days); return format(c.getTimeInMillis(),"yyyy-MM-dd",c.getTimeZone());
@@ -270,6 +310,39 @@ final class ScheduleCore {
         JSONObject b=normalizeBlock(input,id,now,kind,source,null);
         arr(document,"blocks").put(b); touch(now); return copy(b);
     }
+    private static String sha256(String value) {
+        try {
+            byte[] digest=MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder out=new StringBuilder();
+            for(byte b:digest) out.append(String.format(Locale.US,"%02x",b&255));
+            return out.toString();
+        } catch(Exception e) { throw new IllegalStateException(e); }
+    }
+    private static String createFingerprint(JSONObject input,String requestedId,String source) {
+        String kind=clean(input.optString("kind","plan"));
+        JSONObject normalized=normalizeBlock(input,"schedule_intent",1L,kind,source,null);
+        normalized.remove("id"); normalized.remove("created_at_ms"); normalized.remove("updated_at_ms");
+        put(normalized,"requested_id",clean(requestedId));
+        return sha256(normalized.toString());
+    }
+    JSONObject createIdempotent(JSONObject input,String requestedId,long now,String source,String key) {
+        String stableKey=clean(key);
+        if(stableKey.length()<8 || stableKey.length()>128 || !stableKey.matches("[A-Za-z0-9._:-]+"))
+            throw bad("schedule_idempotency_key_invalid");
+        String fingerprint=createFingerprint(input,requestedId,source);
+        JSONArray records=arr(document,"idempotency");
+        JSONObject existing=find(records,stableKey);
+        if(existing!=null) {
+            if(!fingerprint.equals(existing.optString("fingerprint"))) throw bad("schedule_idempotency_conflict");
+            return obj("block",copy(existing.optJSONObject("result_block")),"idempotency_key",stableKey,"idempotency_replayed",true);
+        }
+        String id=clean(requestedId); if(id.isEmpty()) id=newId();
+        JSONObject block=create(input,id,now,source);
+        records.put(obj("id",stableKey,"key",stableKey,"fingerprint",fingerprint,"block_id",id,
+                "result_block",copy(block),"created_at_ms",now));
+        while(records.length()>MAX_IDEMPOTENCY_RECORDS) records.remove(0);
+        return obj("block",block,"idempotency_key",stableKey,"idempotency_replayed",false);
+    }
     JSONObject update(String id,JSONObject patch,long now,boolean userEdit,JSONObject focusHistory) {
         return update(id,patch,now,userEdit,focusHistory,"user");
     }
@@ -300,10 +373,17 @@ final class ScheduleCore {
         return obj("deleted_id",id,"deleted",true);
     }
     JSONObject restore(String id,long now,JSONObject history) {
-        boolean removed=remove(arr(document,"tombstones"),id);
-        removed=remove(arr(document,"overrides"),id)||removed;
-        if(!removed) throw bad("schedule_override_not_found:"+id);
-        if(get(id,history)==null) throw bad("schedule_restore_source_not_found:"+id);
+        JSONObject tomb=find(arr(document,"tombstones"),id);
+        if(tomb==null) throw bad("schedule_override_not_found:"+id);
+        String source=tomb.optString("source");
+        if(!source.equals("recurrence")&&!source.equals("focus_session")) throw bad("schedule_restore_not_supported:"+id);
+        JSONObject override=find(arr(document,"overrides"),id);
+        remove(arr(document,"tombstones"),id); remove(arr(document,"overrides"),id);
+        if(get(id,history)==null) {
+            replace(arr(document,"tombstones"),tomb);
+            if(override!=null) replace(arr(document,"overrides"),override);
+            throw bad("schedule_restore_source_not_found:"+id);
+        }
         touch(now); return obj("restored_id",id);
     }
     static JSONObject focusProjection(JSONObject session) {
@@ -358,15 +438,20 @@ final class ScheduleCore {
                 if(!tombstoned(b.optString("id"))&&overlap(b.optLong("start_at_ms"),b.optLong("end_at_ms"),from,to)&&seen.add(b.optString("id"))) result.add(copy(b));
                 continue;
             }
-            JSONObject r=b.optJSONObject("repeat"); if(r==null) continue;
-            TimeZone z=zone(r.optString("timezone"));
-            // Include occurrence starts before the range for long/cross-midnight blocks.
-            int back=Math.max(1,r.optInt("end_day_offset",0)+1);
-            String first=date(from,z),last=date(to-1,z);
-            for(String d=addDays(first,-back);d.compareTo(last)<=0;d=addDays(d,1)) {
-                JSONObject o=occurrence(b,d);
-                if(o==null||tombstoned(o.optString("id"))||find(arr(document,"overrides"),o.optString("id"))!=null) continue;
-                if(overlap(o.optLong("start_at_ms"),o.optLong("end_at_ms"),from,to)&&seen.add(o.optString("id"))) result.add(o);
+            try {
+                JSONObject r=b.optJSONObject("repeat"); if(r==null) continue;
+                TimeZone z=zone(r.optString("timezone"));
+                // Include occurrence starts before the range for long/cross-midnight blocks.
+                int back=Math.max(1,r.optInt("end_day_offset",0)+1);
+                String first=date(from,z),last=date(to-1,z);
+                for(String d=addDays(first,-back);d.compareTo(last)<=0;d=addDays(d,1)) {
+                    JSONObject o;
+                    try { o=occurrence(b,d); } catch(RuntimeException invalidOccurrence) { continue; }
+                    if(o==null||tombstoned(o.optString("id"))||find(arr(document,"overrides"),o.optString("id"))!=null) continue;
+                    if(overlap(o.optLong("start_at_ms"),o.optLong("end_at_ms"),from,to)&&seen.add(o.optString("id"))) result.add(o);
+                }
+            } catch(RuntimeException invalidSeries) {
+                // One malformed or unresolvable series must not hide other Schedule facts.
             }
         }
         for(JSONObject b:projected(history)) if(overlap(b.optLong("start_at_ms"),b.optLong("end_at_ms"),from,to)&&seen.add(b.optString("id"))) result.add(b);
@@ -395,18 +480,29 @@ final class ScheduleCore {
     }
     JSONObject summary(long now,TimeZone zone,JSONObject history) {
         long[] day=dayRange(date(now,zone),zone);
-        List<JSONObject> list=candidates(day[0],day[1],history);
-        JSONObject current=null,next=null,actual=null; JSONArray remaining=new JSONArray(); int count=0;
-        for(JSONObject b:list) {
+        List<JSONObject> today=candidates(day[0],day[1],history);
+        JSONObject current=null,actual=null; JSONArray remaining=new JSONArray(); int count=0;
+        for(JSONObject b:today) {
             long start=b.optLong("start_at_ms"),end=b.optLong("end_at_ms");
             if("plan".equals(b.optString("kind"))) {
                 if(start<=now&&end>now&&(current==null||start>current.optLong("start_at_ms"))) current=b;
-                if(start>now&&(next==null||start<next.optLong("start_at_ms"))) next=b;
-                if(end>now) { count++; if(remaining.length()<6) remaining.put(compact(b)); }
+                if(start>now) { count++; if(remaining.length()<6) remaining.put(compact(b)); }
             } else if(start<=now&&end>now&&(actual==null||start>actual.optLong("start_at_ms"))) actual=b;
         }
+        long searchEnd=localMidnight(addDays(date(now,zone),8),zone);
+        JSONObject next=null;
+        for(JSONObject b:candidates(now,searchEnd,history)) {
+            long start=b.optLong("start_at_ms");
+            if("plan".equals(b.optString("kind"))&&start>now&&(next==null||start<next.optLong("start_at_ms"))) next=b;
+        }
+        JSONObject search=obj("from_ms",now,"to_ms",searchEnd,"future_local_days",7,"bounded",true,
+                "status",next==null?"none_within_window":"found");
         return obj("schema_version",VERSION,"available",true,"source","android_local","updated_at_ms",updatedAt(),
-                "queried_at_ms",now,"timezone",zone.getID(),"current_plan",current==null?JSONObject.NULL:compact(current),"next_plan",next==null?JSONObject.NULL:compact(next),"remaining_plan_count",count,"remaining_plans",remaining,"current_actual",actual==null?JSONObject.NULL:compact(actual));
+                "queried_at_ms",now,"timezone",zone.getID(),"current_plan",current==null?JSONObject.NULL:compact(current),
+                "today_remaining_plan_count",count,"today_remaining_plans",remaining,"remaining_scope","today",
+                "remaining_plan_count",count,"remaining_plans",remaining,
+                "next_plan",next==null?JSONObject.NULL:compact(next),"next_plan_search",search,
+                "current_actual",actual==null?JSONObject.NULL:compact(actual));
     }
     static JSONObject compact(JSONObject b) {
         if(b==null) return null;
@@ -421,7 +517,7 @@ final class ScheduleCore {
             int minutes=b.optInt("reminder_minutes_before",-1); if(minutes<0) continue;
             long fire=b.optLong("start_at_ms")-minutes*60000L;
             if(fire<from||fire>to) continue;
-            out.put(obj("id",b.optString("id"),"title",b.optString("title"),"start_at_ms",b.optLong("start_at_ms"),"fire_at_ms",fire,"token",b.optString("id")+":"+fire));
+            out.put(reminder(b));
         }
         return out;
     }
@@ -432,9 +528,17 @@ final class ScheduleCore {
             int minutes=b.optInt("reminder_minutes_before",-1); if(minutes<0) continue;
             long fire=b.optLong("start_at_ms")-minutes*60000L;
             if(fire<=now||fire>horizon||tombstoned(b.optString("id"))) continue;
-            if(best==null||fire<best.optLong("fire_at_ms")) best=obj("id",b.optString("id"),"title",b.optString("title"),"start_at_ms",b.optLong("start_at_ms"),"fire_at_ms",fire,"token",b.optString("id")+":"+fire);
+            if(best==null||fire<best.optLong("fire_at_ms")) best=reminder(b);
         }
         return best;
+    }
+    static JSONObject reminder(JSONObject b) {
+        if(b==null || !"plan".equals(b.optString("kind"))) return null;
+        int minutes=b.optInt("reminder_minutes_before",-1); if(minutes<0) return null;
+        long start=b.optLong("start_at_ms",0),fire=start-minutes*60000L;
+        if(start<=0) return null;
+        return obj("id",b.optString("id"),"title",b.optString("title"),"start_at_ms",start,
+                "fire_at_ms",fire,"token",b.optString("id")+":"+fire);
     }
     static final long MAX_REMINDER_LEAD_MS=30L*DAY_MS;
 }

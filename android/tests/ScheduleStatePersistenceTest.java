@@ -29,6 +29,7 @@ public final class ScheduleStatePersistenceTest {
     static JSONObject call(JSONObject c){return ScheduleState.handleCommand(ctx,c);}
     static JSONObject ok(JSONObject c){JSONObject r=call(c);yes(r.optBoolean("ok"),r.toString());return r;}
     static JSONObject create(String kind,String title,long start,long end){JSONObject c=command("create");ScheduleCore.put(c,"kind",kind);ScheduleCore.put(c,"title",title);ScheduleCore.put(c,"start_at_ms",start);ScheduleCore.put(c,"end_at_ms",end);return c;}
+    static JSONObject aiCreate(String title,long start,long end,String key){JSONObject c=create("plan",title,start,end);ScheduleCore.put(c,"actor","ai");ScheduleCore.put(c,"source","ai");if(key!=null)ScheduleCore.put(c,"idempotency_key",key);return c;}
     static JSONObject state(){return new JSONObject(prefs.getString(ScheduleState.KEY_STATE,"{}"));}
     static void reset(){prefs.hook=null;prefs.edit().clear().commit();prefs.failNext=false;prefs.commitCount=0;}
     static JSONObject query(){return ScheduleState.queryLocal(ctx,ScheduleCore.date(now(),java.util.TimeZone.getDefault()),false,"all",0,500);}
@@ -86,7 +87,7 @@ public final class ScheduleStatePersistenceTest {
         yes(ScheduleState.queryLocal(ctx,ScheduleCore.date(a,java.util.TimeZone.getDefault()),false,"plan",0,100).getInt("total_count")>=2,"same Todo has multiple plans");
         JSONObject actual=create("actual","吃饭",a,b);ScheduleCore.put(actual,"source","user");ok(actual);
         JSONObject ai=create("actual","补录",a,b);ScheduleCore.put(ai,"actor","ai");ScheduleCore.put(ai,"source","ai_confirmed");
-        yes(!call(ai).optBoolean("ok"),"AI unconfirmed actual rejected");ScheduleCore.put(ai,"confirmed_by_user",true);ok(ai);
+        yes(!call(ai).optBoolean("ok"),"AI unconfirmed actual rejected");ScheduleCore.put(ai,"confirmed_by_user",true);ScheduleCore.put(ai,"idempotency_key","actual-confirmed-001");ok(ai);
         JSONObject forged=create("actual","伪造",a,b);ScheduleCore.put(forged,"actor","ai");ScheduleCore.put(forged,"source","focus_session");ScheduleCore.put(forged,"confirmed_by_user",true);
         yes(!call(forged).optBoolean("ok"),"no forged Focus source");
         JSONObject future=create("actual","未来",now()+60000,now()+120000);yes(!call(future).optBoolean("ok"),"no future completed actual");
@@ -117,6 +118,37 @@ public final class ScheduleStatePersistenceTest {
         yes(FocusSessionCore.findSession(FocusMode.completedSessionsSnapshot(ctx),sid)!=null,"Focus history not deleted");
         JSONObject restore=command("restore");ScheduleCore.put(restore,"block_id",id);ok(restore);
         yes(ScheduleState.handleCommand(ctx,o("action","get_schedule","from_ms",from,"to_ms",to)).getJSONArray("blocks").length()==1,"explicit restore");
+    }
+    static void testIdempotentCreateAfterLostResponse()throws Exception{
+        reset();ScheduleState.initialize(ctx);long a=now()+3600000,b=a+3600000;
+        JSONObject noKey=aiCreate("缺少幂等键",a,b,null);
+        yes(!call(noKey).optBoolean("ok"),"remote create requires stable identity");
+
+        JSONObject create=aiCreate("可靠创建",a,b,"schedule-create-attempt-001");
+        JSONObject first=ok(create);String id=first.getJSONObject("block").getString("id");
+        yes(!first.optBoolean("idempotency_replayed"),"first create is not replayed");
+        // Simulate: Android committed, but the transport response was lost and the same MCP call retries.
+        JSONObject retry=ok(create);
+        yes(retry.optBoolean("idempotency_replayed"),"lost-response retry is replayed");
+        yes(id.equals(retry.getJSONObject("block").getString("id")),"retry returns original block id");
+        yes(state().getJSONArray("blocks").length()==1,"retry does not create a second block");
+        yes(state().getJSONArray("idempotency").length()==1,"idempotency ledger persisted");
+        JSONObject conflict=aiCreate("不同意图",a,b,"schedule-create-attempt-001");
+        yes(!call(conflict).optBoolean("ok"),"same key cannot merge a different intent");
+        JSONObject stable=aiCreate("稳定领域 ID",a+7200000,b+7200000,null);ScheduleCore.put(stable,"block_id","schedule_client_stable");
+        JSONObject stableFirst=ok(stable),stableRetry=ok(stable);
+        yes(stableRetry.optBoolean("idempotency_replayed"),"stable domain id is an idempotency fallback");
+        yes(stableFirst.getJSONObject("block").getString("id").equals(stableRetry.getJSONObject("block").getString("id")),"stable domain retry keeps id");
+
+        reset();ScheduleState.initialize(ctx);
+        JSONObject concurrent=aiCreate("并发创建",a,b,"schedule-create-concurrent-001");
+        Gate gate=new Gate("create-A");prefs.hook=gate;
+        Task<JSONObject> one=new Task<>("create-A",()->call(concurrent));await(gate.read);
+        Task<JSONObject> two=new Task<>("create-B",()->call(concurrent));blocked(two.thread);
+        gate.release.countDown();JSONObject oneResult=one.get(),twoResult=two.get();prefs.hook=null;
+        yes(oneResult.optBoolean("ok")&&twoResult.optBoolean("ok"),"concurrent retries succeed");
+        yes(oneResult.getJSONObject("block").getString("id").equals(twoResult.getJSONObject("block").getString("id")),"concurrent retries share block id");
+        yes(state().getJSONArray("blocks").length()==1,"concurrent retry is atomic");
     }
     static void testConcurrentWriters()throws Exception{
         reset();ScheduleState.initialize(ctx);long a=now()-7200000,b=a+3600000;
@@ -152,6 +184,8 @@ public final class ScheduleStatePersistenceTest {
         JSONObject deleted=command("delete");ScheduleCore.put(deleted,"block_id",sid);ScheduleCore.put(deleted,"scope","all");ok(deleted);
         yes(ScheduleState.handleCommand(ctx,o("action","get_schedule","block_id",oid)).getJSONObject("block").getString("title").equals("只改本次"),"explicit occurrence survives series deletion");
         yes(ScheduleState.handleCommand(ctx,o("action","get_schedule","block_id",sid)).isNull("block"),"deleted series absent");
+        JSONObject restoreSeries=command("restore");ScheduleCore.put(restoreSeries,"block_id",sid);
+        yes(call(restoreSeries).optString("result").contains("restore_not_supported"),"public restore does not promise deleted series recovery");
         yes(!ScheduleState.handleCommand(ctx,o("action","get_schedule","view","not-a-view")).optBoolean("ok"),"invalid view rejected");
     }
     static void testLockGuard()throws Exception{
@@ -159,7 +193,7 @@ public final class ScheduleStatePersistenceTest {
         try{load.invoke(null,ctx);throw new AssertionError("unlocked load accepted");}catch(InvocationTargetException e){yes(e.getCause() instanceof IllegalStateException,"state lock guard");}
     }
     public static void main(String[] args)throws Exception{
-        testInitializationAndPersistence();testTodoBindingAndActual();testFocusSourceAndOverrides();testConcurrentWriters();testExactIdAndRecurrenceScopes();testLockGuard();
+        testInitializationAndPersistence();testTodoBindingAndActual();testFocusSourceAndOverrides();testIdempotentCreateAfterLostResponse();testConcurrentWriters();testExactIdAndRecurrenceScopes();testLockGuard();
         System.out.println("ScheduleStatePersistenceTest: PASS (production Android state RMW, real Todo/Focus, controlled threads, in-memory SharedPreferences)");
     }
 }
